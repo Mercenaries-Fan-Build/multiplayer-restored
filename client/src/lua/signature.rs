@@ -1,4 +1,4 @@
-//! Byte signatures for the six code sites the `Mp` namespace needs, and the structural checks that tie
+//! Byte signatures for the seven code sites the `Mp` namespace needs, and the structural checks that tie
 //! them together.
 //!
 //! Same rules as the ProtoSSL table ([`crate::signature`]): every pattern is scanned over the main
@@ -15,6 +15,7 @@
 //! | [`LuaFn::LuaLRegister`] | `0x0085F500` | Lua 5.1 `luaL_register` with the engine's register ABI: `ECX = L`, `EAX = libname`, table pushed, caller pops (the `"name conflict for module"` string is referenced inside it) |
 //! | [`LuaFn::LuaSNewLStr`] | `0x0086A2B0` | `luaS_newlstr(L, str, len)`, cdecl, returns the `TString*` (`luaI_openlib`'s `lua_setfield` calls it with `push len; push str; push L`) |
 //! | [`LuaFn::LuaGErrorMsg`] | `0x0085EEA0` | `luaG_errormsg(L)` with `L` in `EAX`: runs `L->errfunc` (`+0x60`) if set, then `luaD_throw(L, LUA_ERRRUN)` (`longjmp`); `error()` (`0x00860480`) ends in it |
+//! | [`LuaFn::AccountClear`] | `0x00848900` | the front end's login-failure handler: empties the account name (`0x01176460`) and the password (`0x01176480`) with `mov byte [moffs32], al`, then posts the failure to the UI. `Mp.Logout` reads the two buffer addresses from it and empties them the same way; it is never called or patched |
 
 use thiserror::Error;
 
@@ -29,6 +30,7 @@ pub enum LuaFn {
     LuaLRegister,
     LuaSNewLStr,
     LuaGErrorMsg,
+    AccountClear,
 }
 
 /// Offset of the `lua_State*` in the script host (`mov [esi+0x10], eax` in [`LuaFn::ScriptHostInit`],
@@ -44,14 +46,23 @@ pub const HOST_VTABLE_INIT_SLOT: u32 = 0x14;
 /// Offset of the `call RegisterNamespaces` instruction inside the [`LuaFn::ScriptHostInit`] pattern.
 const INIT_CALL_AT: usize = 71;
 
+/// Offsets of the `mov byte [moffs32], al` (`a2`) instructions in [`LuaFn::AccountClear`] that empty the
+/// account name and the password.
+const CLEAR_NAME_AT: usize = 20;
+const CLEAR_PASSWORD_AT: usize = 25;
+/// The account-name buffer's size: the password buffer follows it (`FUN_00847760` fills both; `FUN_00848520`
+/// copies the login screen's two strings into them).
+pub const ACCOUNT_NAME_SIZE: u32 = 0x20;
+
 impl LuaFn {
-    pub const ALL: [LuaFn; 6] = [
+    pub const ALL: [LuaFn; 7] = [
         LuaFn::RegisterNamespaces,
         LuaFn::ScriptHostInit,
         LuaFn::ScriptHostCtor,
         LuaFn::LuaLRegister,
         LuaFn::LuaSNewLStr,
         LuaFn::LuaGErrorMsg,
+        LuaFn::AccountClear,
     ];
 
     /// The sites the ASI detours (the others are called or read, never patched).
@@ -65,6 +76,7 @@ impl LuaFn {
             LuaFn::LuaLRegister => "luaL_register",
             LuaFn::LuaSNewLStr => "luaS_newlstr",
             LuaFn::LuaGErrorMsg => "luaG_errormsg",
+            LuaFn::AccountClear => "OnlineAccountClear",
         }
     }
 
@@ -116,6 +128,14 @@ impl LuaFn {
                  83 c4 08 8b 46 08 8b 48 f8 89 08 8b 50 fc 89 50 04 8b 46 08 8b 0f 83 e8 08 89 08 8b 57 04 \
                  89 50 04"
             }
+            // sub esp,0x10; mov eax,[esp+0x14]; mov edx,[<game>]; push esi; mov [ecx+0x10],eax; xor eax,eax;
+            // push edi; mov byte [<name>],al; mov byte [<password>],al; push eax; mov [ecx+0xd],al; ...
+            // mov esi,[edx+0xa884]; ...; call <post>; pop edi; pop esi; add esp,0x10; ret 4
+            LuaFn::AccountClear => {
+                "83 ec 10 8b 44 24 14 8b 15 ?? ?? ?? ?? 56 89 41 10 33 c0 57 a2 ?? ?? ?? ?? a2 ?? ?? ?? ?? \
+                 50 88 41 0d 8b b2 84 a8 00 00 50 8d 4c 24 10 51 bf ?? ?? ?? ?? 89 44 24 14 e8 ?? ?? ?? ?? \
+                 5f 5e 83 c4 10 c2 04 00"
+            }
         }
     }
 }
@@ -123,8 +143,10 @@ impl LuaFn {
 /// Where every site was found, and the script host's address.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LuaSites {
-    va: [u32; 6],
+    va: [u32; 7],
     host: u32,
+    account_name: u32,
+    account_password: u32,
 }
 
 impl LuaSites {
@@ -134,6 +156,14 @@ impl LuaSites {
     /// The script host singleton (`this` of [`LuaFn::ScriptHostInit`]).
     pub fn host(&self) -> u32 {
         self.host
+    }
+    /// The game's in-memory account name (`[Network] Username` copied in at online start).
+    pub fn account_name(&self) -> u32 {
+        self.account_name
+    }
+    /// The game's in-memory password, typed on the login screen.
+    pub fn account_password(&self) -> u32 {
+        self.account_password
     }
 }
 
@@ -147,6 +177,11 @@ pub enum LuaResolveError {
     InitCallsElsewhere { init: u32, called: u32, walker: u32 },
     #[error("ScriptHostCtor at {ctor:#x} is inconsistent: {why}")]
     Ctor { ctor: u32, why: String },
+    #[error(
+        "OnlineAccountClear at {clear:#x} empties {name:#x} and {password:#x}; the password buffer must follow the \
+         {ACCOUNT_NAME_SIZE:#x}-byte name buffer"
+    )]
+    AccountBuffers { clear: u32, name: u32, password: u32 },
 }
 
 fn u32_at(b: &[u8], at: usize) -> u32 {
@@ -171,7 +206,7 @@ pub fn resolve(
         ));
     }
     let off = |f: LuaFn| hits[f as usize].1[0];
-    let mut va = [0u32; 6];
+    let mut va = [0u32; 7];
     for f in LuaFn::ALL {
         va[f as usize] = va_of(off(f));
     }
@@ -217,7 +252,19 @@ pub fn resolve(
             return Err(LuaResolveError::Ctor { ctor, why: format!("vtable slot {slot:#x} is not readable") });
         }
     }
-    Ok(LuaSites { va, host })
+
+    // The account-clear function empties the name buffer and the password buffer right after it.
+    let a = off(LuaFn::AccountClear);
+    let account_name = u32_at(code, a + CLEAR_NAME_AT + 1);
+    let account_password = u32_at(code, a + CLEAR_PASSWORD_AT + 1);
+    if account_password != account_name.wrapping_add(ACCOUNT_NAME_SIZE) {
+        return Err(LuaResolveError::AccountBuffers {
+            clear: va[LuaFn::AccountClear as usize],
+            name: account_name,
+            password: account_password,
+        });
+    }
+    Ok(LuaSites { va, host, account_name, account_password })
 }
 
 #[cfg(test)]
@@ -243,6 +290,8 @@ pub(crate) mod tests {
             (LuaFn::LuaSNewLStr, true) => 0x86a4d0,
             (LuaFn::LuaGErrorMsg, false) => 0x85eea0,
             (LuaFn::LuaGErrorMsg, true) => 0x85f0c0,
+            (LuaFn::AccountClear, false) => 0x848900,
+            (LuaFn::AccountClear, true) => 0x848b60,
         }
     }
 
@@ -278,6 +327,8 @@ pub(crate) mod tests {
             }
             let host = if image == testdata::V11_DUMP { 0x14a4da0 } else { 0x14a5da0 };
             assert_eq!(sites.host(), host, "{image}");
+            let name = if image == testdata::V11_DUMP { 0x1175460 } else { 0x1176460 };
+            assert_eq!((sites.account_name(), sites.account_password()), (name, name + 0x20), "{image}");
         }
     }
 
@@ -308,6 +359,24 @@ pub(crate) mod tests {
         let p: Vec<&str> = init.split_whitespace().collect();
         assert_eq!(p[INIT_CALL_AT], "e8");
         assert_eq!(p.len(), INIT_CALL_AT + 5);
+        // The two `mov byte [moffs32], al` the account buffers are read from, each followed by a wildcarded address.
+        let clear: Vec<&str> = LuaFn::AccountClear.pattern().split_whitespace().collect();
+        for at in [CLEAR_NAME_AT, CLEAR_PASSWORD_AT] {
+            assert_eq!(clear[at], "a2", "offset {at}");
+            assert_eq!(clear[at + 1..at + 5], ["??"; 4], "offset {at}");
+        }
+    }
+
+    #[test]
+    fn account_buffers_must_be_adjacent() {
+        let bytes = testdata::read_exe(testdata::EXES[0]);
+        let h = PeHeaders::parse(&bytes).unwrap();
+        let (sec, code) = h.file_section(&bytes, crate::signature::CODE_SECTION).unwrap();
+        let mut patched = code.to_vec();
+        let clear = (expected(testdata::EXES[0], LuaFn::AccountClear) - 0x401000) as usize;
+        patched[clear + CLEAR_PASSWORD_AT + 1] ^= 0x40;
+        let err = resolve(&patched, |o| h.va_of(sec, o), file_reader(&bytes, &h)).unwrap_err();
+        assert!(matches!(err, LuaResolveError::AccountBuffers { name: 0x1176460, .. }), "{err}");
     }
 
     #[test]

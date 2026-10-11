@@ -111,6 +111,15 @@ fn stop(c: Connection, why: &str) {
 }
 
 impl LobbyProvider for WsLobbyProvider {
+    fn end(&self, why: &str) -> Result<(), String> {
+        let mut cur = self.current.lock().map_err(|_| "lobby provider lock poisoned".to_string())?;
+        if let Some(old) = cur.take() {
+            self.log.info(format!("lobby WebSocket: closing the connection ({why})"));
+            stop(old, why);
+        }
+        Ok(())
+    }
+
     fn start(&self, session: &LoggedIn) -> Result<(), String> {
         let mut cur = self.current.lock().map_err(|_| "lobby provider lock poisoned".to_string())?;
         if let Some(old) = cur.take() {

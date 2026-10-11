@@ -1,6 +1,6 @@
 [package]
 name = "multiplayer_restored"
-version = "0.1.0"
+version = "0.1.2"
 description = "Mercenaries 2 multiplayer client ASI: terminates FESL/Theater locally and talks to the multiplayer server over HTTPS"
 edition = "2024"
 publish = false
@@ -41,6 +41,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_Networking_WinSock",
     "Win32_System_IO",
+    "Win32_System_WindowsProgramming",
 ] }
 
 [profile.release]

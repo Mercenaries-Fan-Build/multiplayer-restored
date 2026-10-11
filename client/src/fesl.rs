@@ -26,6 +26,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
+use mercs2_mp_api::ErrorCode;
 use mercs2_mp_api::rest::{ClientInfo, CreateAccount, CreateSession};
 use mercs2_plasma_proto::fesl::{FeslId, MultipartAssembler, MultipartError, encode_reply};
 use mercs2_plasma_proto::frame::{self, FrameDecoder, FrameError, Kind};
@@ -34,6 +35,7 @@ use thiserror::Error;
 
 use mercs2_mp_api::ws::{GameSummary, Joinability, Request, Response};
 
+use crate::account::StoredAccount;
 use crate::config::{Config, Country, Endpoint};
 use crate::errors::{FeslError, GENERIC_ERROR_CODE, map_api_error};
 use crate::lobby::{Lobby, LobbyEvent, LobbyProvider};
@@ -73,6 +75,8 @@ pub enum FeslFailure {
     Transport { what: String, msg: String },
     #[error("lobby: {0}")]
     Lobby(String),
+    #[error("stored account: {0}")]
+    Account(String),
 }
 
 /// Settings the adapter needs, taken from the ini and the build identity.
@@ -136,6 +140,8 @@ pub struct FeslAdapter<B: Backend> {
     settings: Arc<FeslSettings>,
     backend: B,
     session: SessionSlot,
+    /// The game's stored account name, forgotten when a Login is refused ([`crate::account`]).
+    account: Arc<dyn StoredAccount>,
     log: Logger,
     decoder: FrameDecoder,
     multipart: HashMap<u32, (Kind, MultipartAssembler)>,
@@ -166,6 +172,7 @@ impl<B: Backend> FeslAdapter<B> {
         settings: Arc<FeslSettings>,
         backend: B,
         session: SessionSlot,
+        account: Arc<dyn StoredAccount>,
         lobby_provider: Arc<dyn LobbyProvider>,
         room_keys: RoomKeyStore,
         log: Logger,
@@ -174,6 +181,7 @@ impl<B: Backend> FeslAdapter<B> {
             settings,
             backend,
             session,
+            account,
             log,
             decoder: FrameDecoder::new(MAX_INBOUND_FRAME),
             multipart: HashMap::new(),
@@ -415,6 +423,17 @@ impl<B: Backend> FeslAdapter<B> {
         Ok(Some((name, password)))
     }
 
+    /// A refused Login: remove the stored account name, so the game's next online start offers Create Account
+    /// instead of logging in with a name the server will not accept.
+    fn forget_stored_account(&self, why: &str) -> Result<(), FeslFailure> {
+        self.account.forget().map_err(|e| FeslFailure::Account(format!("Login {why}, but the stored account name could not be removed: {e}")))?;
+        self.log.info(format!(
+            "Login {why}: removed the stored account name ({}) so the game offers Create Account",
+            self.account.describe()
+        ));
+        Ok(())
+    }
+
     fn submit(&mut self, p: Pending, req: BackendRequest) {
         let job = self.next_job;
         self.next_job += 1;
@@ -427,7 +446,9 @@ impl<B: Backend> FeslAdapter<B> {
         if r.get_int("returnEncryptedInfo")? == Some(1) {
             self.log.info("Login asked for encryptedLoginInfo; none is issued (the game clears it when absent)");
         }
-        let Some((username, password)) = self.credentials(kind, tid, txn, r)? else { return Ok(()) };
+        let Some((username, password)) = self.credentials(kind, tid, txn, r)? else {
+            return self.forget_stored_account("refused before reaching the server");
+        };
         let req = CreateSession { username: username.clone(), password, client: self.settings.client.clone() };
         self.submit(
             Pending { kind, tid, txn: txn.to_owned(), what: PendingKind::Login { username } },
@@ -501,6 +522,12 @@ impl<B: Backend> FeslAdapter<B> {
             }
             (_, Ok(other)) => {
                 return Err(FeslFailure::Protocol(format!("{what}: backend answered with the wrong reply type {other:?}")));
+            }
+            // The server answers an unknown name and a wrong password alike, so either way the stored name goes.
+            (PendingKind::Login { username }, Err(BackendFailure::Api(e))) if e.code == ErrorCode::BadCredentials => {
+                self.log.warn(format!("{what}: server refused: {e}"));
+                self.reply_error(p.kind, p.tid, &p.txn, &map_api_error(&e))?;
+                self.forget_stored_account(&format!("the server refused {username:?}"))?;
             }
             (_, Err(BackendFailure::Api(e))) => {
                 self.log.warn(format!("{what}: server refused: {e}"));
@@ -668,6 +695,7 @@ fn kind_name(k: Kind) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::account::fake::FakeStore;
     use crate::config::tests::sample;
     use crate::lobby::fake::FakeProvider;
     use crate::log::capture;
@@ -706,8 +734,15 @@ mod tests {
         session: SessionSlot,
         provider: Arc<FakeProvider>,
         keys: RoomKeyStore,
+        store: Arc<FakeStore>,
         log: capture::Captured,
         now: Instant,
+    }
+
+    impl Rig {
+        fn forgets(&self) -> u32 {
+            *self.store.forgets.lock().unwrap()
+        }
     }
 
     fn rig() -> Rig {
@@ -716,9 +751,10 @@ mod tests {
         let settings = Arc::new(FeslSettings::from_config(&sample(), &"5a".repeat(32)));
         let provider = Arc::new(FakeProvider::default());
         let keys = RoomKeyStore::new(None);
-        let a = FeslAdapter::new(settings, FakeBackend::default(), session.clone(), provider.clone(), keys.clone(), log)
+        let store = Arc::new(FakeStore::default());
+        let a = FeslAdapter::new(settings, FakeBackend::default(), session.clone(), store.clone(), provider.clone(), keys.clone(), log)
             .with_clocks(fixed_wall, fixed_random);
-        Rig { a, dec: FrameDecoder::new(1 << 20), session, provider, keys, log: cap, now: Instant::now() }
+        Rig { a, dec: FrameDecoder::new(1 << 20), session, provider, keys, store, log: cap, now: Instant::now() }
     }
 
     /// A client request exactly as the game frames it: id `0xC0000000 | tid`, TagField text + NUL.
@@ -878,6 +914,23 @@ mod tests {
         assert_eq!(s.token, "server-token");
         assert_eq!(s.lkey, "000102030405060708090a0b0c0d0e0f");
         assert!(!r.log.text().contains("p a s s"), "password must never be logged");
+        assert_eq!(r.forgets(), 0, "a successful Login keeps the stored account name");
+    }
+
+    #[test]
+    fn a_stored_name_that_cannot_be_removed_fails_the_connection() {
+        let mut r = rig();
+        *r.store.fail.lock().unwrap() = Some("Mercs2.ini is read-only".into());
+        r.hello();
+        r.send(&req(b"acct", 4, "TXN=Login\nreturnEncryptedInfo=0\nname=Mattias\npassword=wrongpassword\n"));
+        let job = r.a.backend.submitted[0].0;
+        r.a.backend.ready.push((job, Err(BackendFailure::Api(ApiError::new(ErrorCode::BadCredentials, "wrong username or password")))));
+        let e = r.a.pump(r.now).unwrap_err();
+        assert_eq!(
+            e.to_string(),
+            "stored account: Login the server refused \"Mattias\", but the stored account name could not be removed: \
+             Mercs2.ini is read-only"
+        );
     }
 
     /// Login through the fake backend; returns the adapter with the lobby started.
@@ -1031,6 +1084,8 @@ mod tests {
         let f = r.frames();
         assert_eq!(text(&f[0]), "TXN=Login\nerrorCode=101\nlocalizedMessage=\"wrong username or password\"\n\0");
         assert!(r.session.lock().unwrap().is_none());
+        assert_eq!(r.forgets(), 1, "a refused Login removes the stored account name");
+        assert!(r.log.text().contains("Login the server refused \"Mattias\": removed the stored account name"), "{}", r.log.text());
     }
 
     #[test]
@@ -1045,6 +1100,7 @@ mod tests {
         assert!(text(&f[0]).starts_with(&format!("TXN=Login\nerrorCode={GENERIC_ERROR_CODE}\nlocalizedMessage=")));
         assert!(text(&f[0]).contains("encryptedInfo"));
         assert!(text(&f[1]).contains("username: must be 3-31 characters"));
+        assert_eq!(r.forgets(), 2, "both local refusals remove the stored account name");
     }
 
     #[test]
@@ -1073,6 +1129,7 @@ mod tests {
         r.a.pump(r.now).unwrap();
         let f = r.frames();
         assert_eq!(text(&f[0]), format!("TXN=AddAccount\nerrorCode={GENERIC_ERROR_CODE}\nlocalizedMessage=\"username taken\"\n\0"));
+        assert_eq!(r.forgets(), 0, "a refused AddAccount leaves the stored account name alone");
     }
 
     #[test]
@@ -1084,6 +1141,7 @@ mod tests {
         r.a.backend.ready.push((job, Err(BackendFailure::Transport("TLS handshake with x failed: certificate verify failed".into()))));
         let e = r.a.pump(r.now).unwrap_err();
         assert!(e.to_string().contains("certificate verify failed"), "{e}");
+        assert_eq!(r.forgets(), 0, "an unreachable server is not a refusal");
     }
 
     #[test]

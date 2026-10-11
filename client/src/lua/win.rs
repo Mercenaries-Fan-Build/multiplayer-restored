@@ -93,13 +93,14 @@ struct Reg {
     func: Option<unsafe extern "C" fn(u32) -> i32>,
 }
 
-struct RegTable([Reg; 3]);
+struct RegTable([Reg; 4]);
 // SAFETY: the table is immutable and its pointers are to 'static data and functions.
 unsafe impl Sync for RegTable {}
 
 static MP_LIB: RegTable = RegTable([
     Reg { name: c"GetRoomKey".as_ptr(), func: Some(mp_get_room_key) },
     Reg { name: c"SetRoomKey".as_ptr(), func: Some(mp_set_room_key) },
+    Reg { name: c"Logout".as_ptr(), func: Some(mp_logout) },
     Reg { name: std::ptr::null(), func: None },
 ]);
 
@@ -151,6 +152,43 @@ unsafe extern "C" fn mp_set_room_key(l: u32) -> i32 {
     dispatch(l, bindings::set_room_key)
 }
 
+/// `Mp.Logout` in the game: forget the stored name and end the session ([`crate::account::Logout`]) first, so
+/// a name that cannot be removed leaves everything as it was; then empty the game's in-memory account name and
+/// password the way its login-failure handler does (`mov byte [buffer], 0`, [`LuaFn::AccountClear`]).
+struct GameLogout<'a>(&'a Ctx);
+
+impl bindings::LogoutAction for GameLogout<'_> {
+    fn logout(&self) -> Result<Option<String>, String> {
+        let c = self.0;
+        let was = crate::account::global()?.run(&c.log)?;
+        for addr in [c.sites.account_name(), c.sites.account_password()] {
+            if !readable(addr, 1) {
+                return Err(format!("the game's account buffer at {addr:#x} is not mapped"));
+            }
+            unsafe { std::ptr::write_volatile(addr as usize as *mut u8, 0) };
+        }
+        c.log.info(format!(
+            "logout: emptied the game's account name ({:#x}) and password ({:#x})",
+            c.sites.account_name(),
+            c.sites.account_password()
+        ));
+        Ok(was)
+    }
+}
+
+unsafe extern "C" fn mp_logout(l: u32) -> i32 {
+    let c = ctx();
+    let ret = {
+        let mut vm = Process { newlstr: c.sites.va(LuaFn::LuaSNewLStr) };
+        let mut stack = Stack::new(&mut vm, l);
+        bindings::logout(&mut stack, Ok(&GameLogout(c)), &c.log)
+    };
+    match ret {
+        Ret::Values(n) => n,
+        Ret::Raise(message) => unsafe { raise(l, message) },
+    }
+}
+
 /// Register `Mp` on `l` with the game's `luaL_register`, then pop the table it leaves on the stack.
 fn register(c: &Ctx, l: u32) {
     let mut vm = Process { newlstr: c.sites.va(LuaFn::LuaSNewLStr) };
@@ -182,7 +220,7 @@ fn register(c: &Ctx, l: u32) {
     vm.write_u32(l + L_TOP, top_before);
     let n = REGISTERED.fetch_add(1, Ordering::AcqRel) + 1;
     c.log.info(format!(
-        "registered Lua namespace {NAMESPACE} (GetRoomKey, SetRoomKey) on lua_State {l:#x} (script-host state #{n})"
+        "registered Lua namespace {NAMESPACE} (GetRoomKey, SetRoomKey, Logout) on lua_State {l:#x} (script-host state #{n})"
     ));
 }
 

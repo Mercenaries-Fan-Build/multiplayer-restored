@@ -14,6 +14,7 @@
 //! * runtime: [`config`], [`log`], [`m2sdk`] (the shared m2-sdk layer every detour goes through), and the
 //!   Windows-only hook layer in `win`.
 
+pub mod account;
 pub mod build_id;
 pub mod config;
 pub mod curtime;

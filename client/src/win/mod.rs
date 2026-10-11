@@ -75,6 +75,7 @@ struct RuntimeFactory {
     theater: Arc<TheaterSettings>,
     worker: Worker,
     session: SessionSlot,
+    account: Arc<dyn crate::account::StoredAccount>,
     lobby: Arc<dyn LobbyProvider>,
     relays: Arc<dyn RelayFactory>,
     log: Logger,
@@ -88,6 +89,7 @@ impl ServiceFactory for RuntimeFactory {
             self.settings.clone(),
             self.worker.handle(),
             self.session.clone(),
+            self.account.clone(),
             self.lobby.clone(),
             keys,
             self.log.clone(),
@@ -355,6 +357,13 @@ fn init(hinst: usize) {
     let api = RestApi::new(http);
     let worker = Worker::spawn(move |req| api.execute(req))
         .unwrap_or_else(|e| fatal(Some(&log), &format!("cannot start the worker thread: {e}")));
+    let account: Arc<dyn crate::account::StoredAccount> =
+        Arc::new(crate::account::GameIni::of_main_module().unwrap_or_else(|e| fatal(Some(&log), &format!("stored account: {e}"))));
+    log.info(format!("stored account: {}", account.describe()));
+    let session = crate::session::new_slot();
+    let lobby: Arc<dyn LobbyProvider> = Arc::new(lobby);
+    crate::account::install(crate::account::Logout::new(account.clone(), session.clone(), lobby.clone()))
+        .unwrap_or_else(|e| fatal(Some(&log), &e));
     let factory = RuntimeFactory {
         settings: Arc::new(FeslSettings::from_config(&cfg, &build)),
         theater: Arc::new(TheaterSettings {
@@ -364,8 +373,9 @@ fn init(hinst: usize) {
             relay_close_grace: Duration::from_millis(cfg.relay.close_grace_ms.into()),
         }),
         worker,
-        session: crate::session::new_slot(),
-        lobby: Arc::new(lobby),
+        session,
+        account,
+        lobby,
         relays: Arc::new(relays),
         log: log.clone(),
     };

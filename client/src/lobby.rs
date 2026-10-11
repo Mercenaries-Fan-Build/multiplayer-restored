@@ -39,6 +39,8 @@ pub trait LobbyProvider: Send + Sync {
     /// A new handle on the current lobby. With `pushes`, this handle receives every server push from now
     /// on (taking over from any earlier subscriber). `Err` when there is no lobby (no login yet) or it ended.
     fn handle(&self, pushes: bool) -> Result<Box<dyn Lobby>, String>;
+    /// Close the current lobby (`Mp.Logout`). No lobby open is not an error.
+    fn end(&self, why: &str) -> Result<(), String>;
 }
 
 /// Short description of a request for logs (never includes room keys).
@@ -140,6 +142,10 @@ pub mod fake {
                 return Err("no lobby: not logged in".into());
             }
             Ok(Box::new(self.lobby.clone()))
+        }
+        fn end(&self, why: &str) -> Result<(), String> {
+            self.lobby.kill(why);
+            Ok(())
         }
     }
 }

@@ -325,28 +325,30 @@ impl TheaterAdapter {
     pub fn on_game_bytes(&mut self, bytes: &[u8], now: Instant) -> R {
         self.decoder.feed(bytes);
         while let Some(f) = self.decoder.next_frame().map_err(|e| format!("Theater framing: {e}"))? {
+            // The client's Theater id encoder (`0x970600`) writes 0x40000000 or 0, by a flag each send passes in:
+            // CONN, USER, GLST, CGAM, EGAM, PENT, ... arrive with 0x40000000; UGAM and the keepalive answer with 0.
             if f.id != theater::CLIENT_REQUEST_ID {
-                // Raw dump of every frame the game sends that is not a request, before it is handled.
+                if f.id != theater::OK {
+                    return Err(format!(
+                        "{} frame with id {:#x}; the client's Theater encoder (0x970600) writes only {:#x} or 0",
+                        kind_name(f.kind),
+                        f.id,
+                        theater::CLIENT_REQUEST_ID
+                    ));
+                }
+                // Raw dump of every id-0 frame, before it is handled.
                 self.log.info(format!(
-                    "Theater {} frame from the game with id {:#x}: {} payload bytes, hex {}, text {:?}",
+                    "Theater {} frame from the game with id 0x0: {} payload bytes, hex {}, text {:?}",
                     kind_name(f.kind),
-                    f.id,
                     f.payload.len(),
                     crate::fesl::hex(&f.payload),
                     String::from_utf8_lossy(&f.payload)
                 ));
-                // The game's answer to our keepalive push: id 0 (the request bit is set only on requests).
-                if f.kind == Kind::new(b"PING") && f.id == theater::OK && self.pings_unanswered > 0 {
+                // The game's answer to our keepalive push.
+                if f.kind == Kind::new(b"PING") && self.pings_unanswered > 0 {
                     self.pings_unanswered -= 1;
                     continue;
                 }
-                return Err(format!(
-                    "{} frame with id {:#x}; client requests carry {:#x}, and the only answer the game owes is to a pushed PING ({} unanswered)",
-                    kind_name(f.kind),
-                    f.id,
-                    theater::CLIENT_REQUEST_ID,
-                    self.pings_unanswered
-                ));
             }
             let req = Req { kind: f.kind, r: TagFieldReader::new(&f.payload) };
             let tid = req.int("TID")?.ok_or_else(|| format!("{} without TID", req.name()))?;
@@ -1226,27 +1228,41 @@ mod tests {
     }
 
     #[test]
-    fn an_id_zero_frame_with_no_ping_outstanding_fails_the_connection() {
+    fn id_zero_frames_are_handled_and_other_ids_fail() {
+        // UGAM exactly as the host's game sent it after its own entry (2026-10-11 log): id 0, with a TID.
+        let mut r = rig();
+        hosting(&mut r);
+        r.send(b"EGAM", SELF_EGAM);
+        r.send(b"EGRS", "LID=1\nGID=5\nALLOWED=1\nPID=1\nTID=9\n");
+        r.send(b"PENT", "LID=1\nGID=5\nPID=1\nTID=10\n");
+        r.frames();
+        r.lobby.take_sent();
+        let ugam = frame::encode(
+            Kind::new(b"UGAM"),
+            theater::OK,
+            b"LID=1\nGID=5\nJOIN=O\nMAX-PLAYERS=2\nB-maxObservers=0\nB-numObservers=0\nTID=8\n\0",
+        )
+        .unwrap();
+        r.a.on_game_bytes(&ugam, r.now).unwrap();
+        assert!(r.frames().is_empty(), "UGAM gets no reply");
+        let sent = r.lobby.take_sent();
+        assert!(
+            matches!(&sent[..], [(_, Request::GamesUpdate(u))] if u.game_id == GameId(5) && u.max_players == Some(2)),
+            "{sent:?}"
+        );
+        assert!(r.log.text().contains("Theater UGAM frame from the game with id 0x0: 74 payload bytes"), "{}", r.log.text());
+
+        // An id-0 PING with no keepalive outstanding is handled like any other frame: it needs a TID.
         let mut r = rig();
         r.send(b"CONN", "PROT=2\nPROD=mercs2-pc\nVERS=1.1\nPLAT=PC\nTID=1\n");
         let e = r.a.on_game_bytes(&ping_answer(), r.now).unwrap_err();
-        assert!(e.contains("PING frame with id 0x0") && e.contains("0 unanswered"), "{e}");
-        assert!(r.log.text().contains("Theater PING frame from the game with id 0x0"), "dumped before failing");
+        assert_eq!(e, "PING without TID");
 
-        // One push, two answers: the second has nothing to answer.
+        // Any id the encoder (0x970600) cannot produce fails the connection.
         let mut r = rig();
-        r.send(b"CONN", "PROT=2\nPROD=mercs2-pc\nVERS=1.1\nPLAT=PC\nTID=1\n");
-        r.a.pump(r.now + Duration::from_secs(60)).unwrap();
-        r.a.on_game_bytes(&ping_answer(), r.now).unwrap();
-        assert!(r.a.on_game_bytes(&ping_answer(), r.now).is_err());
-
-        // An id-0 frame of another kind is not an answer even with a PING outstanding.
-        let mut r = rig();
-        r.send(b"CONN", "PROT=2\nPROD=mercs2-pc\nVERS=1.1\nPLAT=PC\nTID=1\n");
-        r.a.pump(r.now + Duration::from_secs(60)).unwrap();
-        let other = frame::encode(Kind::new(b"USER"), theater::OK, &[]).unwrap();
-        let e = r.a.on_game_bytes(&other, r.now).unwrap_err();
-        assert!(e.contains("USER frame with id 0x0") && e.contains("1 unanswered"), "{e}");
+        let odd = frame::encode(Kind::new(b"USER"), 0x8000_0001, b"TID=2\n\0").unwrap();
+        let e = r.a.on_game_bytes(&odd, r.now).unwrap_err();
+        assert!(e.contains("USER frame with id 0x80000001") && e.contains("0x970600"), "{e}");
     }
 
     #[test]

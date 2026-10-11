@@ -5,6 +5,11 @@
 //! * `Mp.SetRoomKey(key)` → `true`, or `false, message` when `key` is not a valid room key
 //!   (`mercs2_mp_api::rules::check_room_key`; the old key is kept). `key == nil` (or no argument) clears it.
 //!
+//! * `Mp.Logout()` → `true`: forgets the account name the game stores (`Mercs2.ini [Network] Username`), empties
+//!   the game's in-memory account name and password, and ends this ASI's server session if one is open
+//!   ([`crate::account`]). The game's next online start then offers Create Account. Raises when the stored
+//!   name cannot be removed.
+//!
 //! Misuse and internal failures raise a Lua error with a message naming the function: an argument of
 //! the wrong type, too many arguments, a room-key store that start-up never installed, a poisoned lock.
 //! Every call is logged.
@@ -113,6 +118,40 @@ pub fn set_room_key<V: Vm>(s: &mut Stack<'_, V>, store: Result<&RoomKeyStore, St
     }
 }
 
+/// What `Mp.Logout` does, behind the Lua calling convention.
+pub trait LogoutAction {
+    /// Log out. `Ok(Some(name))` when a server session was ended, `Ok(None)` when none was open.
+    fn logout(&self) -> Result<Option<String>, String>;
+}
+
+/// `Mp.Logout()`.
+pub fn logout<V: Vm>(s: &mut Stack<'_, V>, action: Result<&dyn LogoutAction, String>, log: &Logger) -> Ret {
+    let n = s.arg_count();
+    if n > 0 {
+        let r = too_many("Logout", 0, n);
+        log_raise(log, "Logout", &r);
+        return r;
+    }
+    match action.and_then(|a| a.logout()) {
+        Ok(was) => {
+            s.push_bool(true);
+            log.info(format!(
+                "Lua {NAMESPACE}.Logout() -> true ({})",
+                match was {
+                    Some(name) => format!("ended the session of {name:?}"),
+                    None => "no session was open".into(),
+                }
+            ));
+            Ret::Values(1)
+        }
+        Err(e) => {
+            let r = Ret::Raise(format!("{NAMESPACE}.Logout: {e}"));
+            log_raise(log, "Logout", &r);
+            r
+        }
+    }
+}
+
 fn describe(key: &Option<String>) -> String {
     match key {
         Some(k) => format!("{k:?}"),
@@ -185,6 +224,39 @@ mod tests {
         assert!(t.contains("Mp.SetRoomKey(\"1234567\") -> true"), "{t}");
         assert!(t.contains("WARN  Lua Mp.SetRoomKey(\"bad key\") -> false"), "{t}");
         assert!(t.contains("Mp.SetRoomKey(nil) -> true"), "{t}");
+    }
+
+    struct Action(Result<Option<String>, String>);
+    impl LogoutAction for Action {
+        fn logout(&self) -> Result<Option<String>, String> {
+            self.0.clone()
+        }
+    }
+
+    #[test]
+    fn logout_returns_true_and_raises_on_failure() {
+        let (log, cap) = logger();
+        let mut a = Arena::with_args(&[]);
+        let ok = Action(Ok(Some("Addicted_24_7".into())));
+        assert_eq!(logout(&mut Stack::new(&mut a, L), Ok(&ok), &log), Ret::Values(1));
+        assert_eq!((a.results(0)[0].0, a.results(0)[0].2), (LUA_TBOOLEAN, 1));
+        let mut a = Arena::with_args(&[]);
+        assert_eq!(logout(&mut Stack::new(&mut a, L), Ok(&Action(Ok(None))), &log), Ret::Values(1));
+        let t = cap.text();
+        assert!(t.contains("Mp.Logout() -> true (ended the session of \"Addicted_24_7\")"), "{t}");
+        assert!(t.contains("Mp.Logout() -> true (no session was open)"), "{t}");
+
+        let mut a = Arena::with_args(&[]);
+        let failed = Action(Err("could not remove [Network] Username: access denied".into()));
+        let r = logout(&mut Stack::new(&mut a, L), Ok(&failed), &log);
+        assert_eq!(r, Ret::Raise("Mp.Logout: could not remove [Network] Username: access denied".into()));
+        assert!(a.results(0).is_empty(), "nothing pushed before a raise");
+
+        let mut a = Arena::with_args(&[ArenaArg::Nil]);
+        assert!(matches!(logout(&mut Stack::new(&mut a, L), Ok(&ok), &log), Ret::Raise(m) if m.contains("at most 0")));
+        let mut a = Arena::with_args(&[]);
+        let missing: Result<&dyn LogoutAction, String> = Err("logout used before start-up installed it".into());
+        assert!(matches!(logout(&mut Stack::new(&mut a, L), missing, &log), Ret::Raise(m) if m.contains("before start-up")));
     }
 
     #[test]
