@@ -3,7 +3,7 @@ format: 2
 shipment:
   name: multiplayer-restored
   title: Multiplayer Restored
-  version: 0.1.0
+  version: 0.1.1
   target: retail
   authors: [Mercenaries Fan Build]
   description: Online play against a self-hostable server; FESL is answered in-process and the server is reached over HTTPS.
