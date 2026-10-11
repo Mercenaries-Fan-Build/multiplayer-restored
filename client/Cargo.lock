@@ -1109,6 +1109,58 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
+name = "mercs2_mp_api"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba1b7dcff09bff7b1e0c17ebe650c2af9356d2428e83fb38dc432fbbd4b12d7c"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "mercs2_mp_server"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d5bdc1ed42e5a4baf2ab2d4a1bbbd1bdf291ec98d9954b86804f1ebfc2e92b6d"
+dependencies = [
+ "argon2",
+ "axum",
+ "bytes",
+ "foreign-types",
+ "futures-util",
+ "http",
+ "hyper",
+ "hyper-util",
+ "instant-acme",
+ "ipnet",
+ "mercs2_mp_api",
+ "openssl",
+ "openssl-sys",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "tokio-openssl",
+ "toml",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "mercs2_plasma_proto"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7872ea3ef59e023abbd9dbf4498daf189d012f10244c7287429710dd822cd241"
+dependencies = [
+ "base64 0.22.1",
+ "thiserror",
+]
+
+[[package]]
 name = "mime"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1142,57 +1194,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "mp_api"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
-name = "mp_server"
-version = "0.1.0"
-dependencies = [
- "argon2",
- "axum",
- "bytes",
- "foreign-types",
- "futures-util",
- "http",
- "hyper",
- "hyper-util",
- "instant-acme",
- "ipnet",
- "mp_api",
- "openssl",
- "openssl-sys",
- "serde",
- "serde_json",
- "sqlx",
- "thiserror",
- "tokio",
- "tokio-openssl",
- "toml",
- "tower",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "multiplayer_restored"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "foreign-types",
  "httparse",
+ "mercs2_mp_api",
+ "mercs2_mp_server",
+ "mercs2_plasma_proto",
  "minhook",
- "mp_api",
- "mp_server",
  "openssl",
  "openssl-src",
  "openssl-sys",
- "plasma_proto",
  "serde",
  "serde_json",
  "sha2",
@@ -1454,14 +1468,6 @@ name = "plain"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
-
-[[package]]
-name = "plasma_proto"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "thiserror",
-]
 
 [[package]]
 name = "potential_utf"

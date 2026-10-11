@@ -1,12 +1,12 @@
 //! The player's current room key, shared by the Theater adapter (game listing / hosting / joining) and the
 //! in-game multiplayer menu (which can change it at runtime). Initialised from `[privacy] room_key`.
 //!
-//! Semantics (`mp_api::rules::check_room_key`): `None` = public games only; `Some(key)` = only games hosted
+//! Semantics (`mercs2_mp_api::rules::check_room_key`): `None` = public games only; `Some(key)` = only games hosted
 //! with exactly that key (case-sensitive, not unique).
 
 use std::sync::{Arc, Mutex, OnceLock};
 
-use mp_api::ApiError;
+use mercs2_mp_api::ApiError;
 
 static GLOBAL: OnceLock<RoomKeyStore> = OnceLock::new();
 
@@ -38,12 +38,12 @@ impl RoomKeyStore {
     /// Replace the key; a malformed key is refused and the old one kept.
     pub fn set(&self, key: Option<String>) -> Result<(), ApiError> {
         if let Some(k) = &key {
-            mp_api::rules::check_room_key(k)?;
+            mercs2_mp_api::rules::check_room_key(k)?;
         }
         let mut guard = self
             .inner
             .lock()
-            .map_err(|_| ApiError::new(mp_api::ErrorCode::Internal, "room key lock poisoned"))?;
+            .map_err(|_| ApiError::new(mercs2_mp_api::ErrorCode::Internal, "room key lock poisoned"))?;
         *guard = key;
         Ok(())
     }

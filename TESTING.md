@@ -16,7 +16,7 @@ The ASI and ini go in the folder pmc_bb loads plugins from (`scripts\`). Check t
 
 ## 0. Server (DigitalOcean)
 
-Follow `src/multiplayer-server/README.md` → "Deploy on a VM with a public IP", with the Let's Encrypt
+Follow the server's `README.md` (https://github.com/Mercenaries-Fan-Build/multiplayer-server) → "Deploy on a VM with a public IP", with the Let's Encrypt
 **production** directory (the ASI trusts only the public CA bundle, so a staging certificate is refused).
 
 - `openssl s_client -connect <domain>:443 -servername <domain> -tls1_3 </dev/null` → `Protocol : TLSv1.3`,

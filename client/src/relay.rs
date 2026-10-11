@@ -2,7 +2,7 @@
 //!
 //! Per game, one DTLS 1.2 client association (OpenSSL) to the relay in the [`RelayAssignment`], pinned to
 //! `cert_sha256` (any other leaf certificate fails the handshake), authenticated by
-//! `Datagram::Hello{session_token}` (`mp_api::relay`). Every other player in the game is shown to the local
+//! `Datagram::Hello{session_token}` (`mercs2_mp_api::relay`). Every other player in the game is shown to the local
 //! game as a loopback **alias** — relay slot `s` ↔ `alias_base + s` under the production [`AliasPlan`] —
 //! with one UDP socket on the alias's tunnel port and one on the voice port:
 //!
@@ -50,9 +50,9 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use foreign_types::ForeignTypeRef;
-use mp_api::GameId;
-use mp_api::relay::{Channel, Datagram};
-use mp_api::ws::RelayAssignment;
+use mercs2_mp_api::GameId;
+use mercs2_mp_api::relay::{Channel, Datagram};
+use mercs2_mp_api::ws::RelayAssignment;
 use openssl::hash::MessageDigest;
 use openssl::ssl::{ErrorCode, Ssl, SslContext, SslMethod, SslStream, SslVerifyMode, SslVersion};
 
@@ -640,7 +640,7 @@ mod tests {
     use crate::lobby::{Lobby, LobbyProvider};
     use crate::log::capture;
     use crate::testserver::{TestServer, call, next_push, wait};
-    use mp_api::ws::{CreateGame, GameCreated, JoinAccepted, Joinability, Privacy, Push, Request, Response};
+    use mercs2_mp_api::ws::{CreateGame, GameCreated, JoinAccepted, Joinability, Privacy, Push, Request, Response};
 
     /// Host + joiner logged in, game created and the join accepted, through the real server.
     /// The lobby connections stay open for the test's lifetime: closing one removes that player.

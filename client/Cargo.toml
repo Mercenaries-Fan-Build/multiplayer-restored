@@ -5,15 +5,15 @@ description = "Mercenaries 2 multiplayer client ASI: terminates FESL/Theater loc
 edition = "2024"
 publish = false
 
-# Standalone package: not a member of src/multiplayer-server's workspace.
+# Standalone package: its own workspace root.
 [workspace]
 
 [lib]
 crate-type = ["cdylib"]
 
 [dependencies]
-plasma_proto = { path = "../../../src/multiplayer-server/crates/plasma_proto" }
-mp_api = { path = "../../../src/multiplayer-server/crates/mp_api" }
+mercs2_plasma_proto = "0.1.0"
+mercs2_mp_api = "0.1.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
@@ -52,6 +52,6 @@ codegen-units = 1
 [dev-dependencies]
 base64 = "0.22"
 # The real server, started in-process by the WebSocket / relay integration tests.
-mp_server = { path = "../../../src/multiplayer-server/crates/mp_server" }
+mercs2_mp_server = "0.1.0"
 tokio = { version = "1", features = ["full"] }
 tempfile = "3"

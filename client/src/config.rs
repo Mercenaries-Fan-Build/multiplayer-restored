@@ -337,7 +337,7 @@ impl Config {
         let room_key = match get(&raw, "privacy", "room_key")? {
             "none" => None,
             key => {
-                mp_api::rules::check_room_key(key)
+                mercs2_mp_api::rules::check_room_key(key)
                     .map_err(|e| ConfigError::Invalid { section: "privacy", key: "room_key", msg: e.message })?;
                 Some(key.to_owned())
             }

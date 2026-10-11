@@ -3,7 +3,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use mp_api::UserId;
+use mercs2_mp_api::UserId;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LoggedIn {

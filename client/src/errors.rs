@@ -1,4 +1,4 @@
-//! `mp_api::ApiError` → FESL `errorCode` / `localizedMessage`.
+//! `mercs2_mp_api::ApiError` → FESL `errorCode` / `localizedMessage`.
 //!
 //! The only error-code → UI mapping found in the exe is the login-result handler `FUN_006caf20`, which
 //! turns `errorCode` into a stringdb key. The keys were resolved against the shipped English stringdb
@@ -22,7 +22,7 @@
 //! not located in the exe (catalogue §1 acct), so which of these the create-account screen displays is
 //! only verifiable in game.
 
-use mp_api::{ApiError, ErrorCode};
+use mercs2_mp_api::{ApiError, ErrorCode};
 
 /// Login result "account was not found" (`FUN_006caf20`, stringdb `0xDB23598B`).
 pub const ACCOUNT_NOT_FOUND: i64 = 101;

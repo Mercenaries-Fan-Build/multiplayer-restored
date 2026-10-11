@@ -1,4 +1,4 @@
-//! The lobby: everything after login that goes through the server's WebSocket (`mp_api::ws`).
+//! The lobby: everything after login that goes through the server's WebSocket (`mercs2_mp_api::ws`).
 //!
 //! Adapters (FESL `pnow`, the Theater adapter) run on the game thread and must never block, so they talk to
 //! the lobby through a [`Lobby`] handle: [`Lobby::request`] queues a request and returns its id, and
@@ -11,8 +11,8 @@
 //! a failed virtual connection, which the game shows as a disconnect. The lobby is never reopened
 //! silently: only a new FESL Login starts a new one.
 
-use mp_api::ApiError;
-use mp_api::ws::{Push, Request, Response};
+use mercs2_mp_api::ApiError;
+use mercs2_mp_api::ws::{Push, Request, Response};
 
 use crate::session::LoggedIn;
 

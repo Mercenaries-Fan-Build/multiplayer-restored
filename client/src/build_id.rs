@@ -1,4 +1,4 @@
-//! Build identity reported to the server as `mp_api::rest::ClientInfo::build_sha256`.
+//! Build identity reported to the server as `mercs2_mp_api::rest::ClientInfo::build_sha256`.
 //!
 //! **Definition:** lowercase hex SHA-256 over the main module's `.text` section bytes as mapped in memory,
 //! covering `min(VirtualSize, SizeOfRawData)` bytes from `ImageBase + VirtualAddress` (see

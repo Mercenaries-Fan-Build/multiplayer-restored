@@ -7,8 +7,8 @@
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::JoinHandle;
 
-use mp_api::ApiError;
-use mp_api::rest::{AccountCreated, CreateAccount, CreateSession, SessionCreated};
+use mercs2_mp_api::ApiError;
+use mercs2_mp_api::rest::{AccountCreated, CreateAccount, CreateSession, SessionCreated};
 use serde::de::DeserializeOwned;
 
 use crate::http::HttpsClient;
@@ -145,8 +145,8 @@ impl Backend for WorkerHandle {
 mod tests {
     use super::*;
     use crate::http::tests::{client_for, serve_once, test_pki};
-    use mp_api::rest::ClientInfo;
-    use mp_api::{ErrorCode, UserId};
+    use mercs2_mp_api::rest::ClientInfo;
+    use mercs2_mp_api::{ErrorCode, UserId};
     use std::time::{Duration, Instant};
 
     fn session_req() -> BackendRequest {

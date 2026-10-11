@@ -3,13 +3,13 @@
 //! * `Mp.GetRoomKey()` → the current room key (a string), or `nil` when the player sees public games
 //!   only.
 //! * `Mp.SetRoomKey(key)` → `true`, or `false, message` when `key` is not a valid room key
-//!   (`mp_api::rules::check_room_key`; the old key is kept). `key == nil` (or no argument) clears it.
+//!   (`mercs2_mp_api::rules::check_room_key`; the old key is kept). `key == nil` (or no argument) clears it.
 //!
 //! Misuse and internal failures raise a Lua error with a message naming the function: an argument of
 //! the wrong type, too many arguments, a room-key store that start-up never installed, a poisoned lock.
 //! Every call is logged.
 
-use mp_api::ErrorCode;
+use mercs2_mp_api::ErrorCode;
 
 use super::state::{Arg, Stack, Vm, type_name};
 use crate::log::Logger;

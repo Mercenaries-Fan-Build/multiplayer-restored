@@ -1,7 +1,7 @@
 //! The Theater service, answered in-process (the virtual connection at the advertised loopback endpoint).
 //!
 //! Frames are the 12-byte ProtoAries frame with TagField text; client requests carry `TID` and the reply
-//! echoes it (appended last); a reply's id word is its error code, 0 = OK (`plasma_proto::theater`). Field
+//! echoes it (appended last); a reply's id word is its error code, 0 = OK (`mercs2_plasma_proto::theater`). Field
 //! lists are `docs/reverse_engineer/multiplayer_txn_catalogue.md` §2; reply shapes copy the exe's own LAN
 //! Theater emulator where one exists (GDAT/GDET/PDAT `FUN_00996ee0`/`FUN_0099eca0`, LDAT `FUN_0099e240`,
 //! GLST `FUN_009a8f00`, CGAM `FUN_009aa020`, EGAM `FUN_0099efe0`, EGEG `FUN_0099ca30`/`FUN_0099cae0`, EGRQ
@@ -49,14 +49,14 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use mp_api::ws::{
+use mercs2_mp_api::ws::{
     CreateGame, GameDetail, GameSummary, JoinAccepted, JoinDenyReason, Joinability, Privacy, Push, Request, Response,
     UpdateGame, UserRef,
 };
-use mp_api::{ApiError, ErrorCode, GameId, UserId, rules};
-use plasma_proto::frame::{FrameDecoder, Kind};
-use plasma_proto::tagfield::{TagFieldReader, TagFields};
-use plasma_proto::theater;
+use mercs2_mp_api::{ApiError, ErrorCode, GameId, UserId, rules};
+use mercs2_plasma_proto::frame::{FrameDecoder, Kind};
+use mercs2_plasma_proto::tagfield::{TagFieldReader, TagFields};
+use mercs2_plasma_proto::theater;
 
 use crate::lobby::{Lobby, LobbyEvent, describe};
 use crate::log::Logger;
@@ -209,7 +209,7 @@ fn parse_join(v: &str) -> Joinability {
     }
 }
 
-fn tf(e: plasma_proto::TagFieldError) -> String {
+fn tf(e: mercs2_plasma_proto::TagFieldError) -> String {
     format!("Theater TagField: {e}")
 }
 
@@ -1014,8 +1014,8 @@ mod tests {
     use super::*;
     use crate::lobby::fake::FakeLobby;
     use crate::log::capture;
-    use mp_api::ws::{GameCreated, PlayerInfo, RelayAssignment};
-    use plasma_proto::frame::{self, Frame};
+    use mercs2_mp_api::ws::{GameCreated, PlayerInfo, RelayAssignment};
+    use mercs2_plasma_proto::frame::{self, Frame};
     use std::net::Ipv4Addr;
     use std::sync::Mutex;
 
@@ -1719,7 +1719,7 @@ mod tests {
         assert_eq!(r.frames(), vec![g("GREM", "ok", "LID=1\nGID=5\n")]);
     }
 
-    /// Both sides against a scripted server: the test relays requests to pushes the way `mp_server`'s hub
+    /// Both sides against a scripted server: the test relays requests to pushes the way `mercs2_mp_server`'s hub
     /// does, and checks that host and joiner agree on PID and TICKET and address each other by alias.
     #[test]
     fn join_flow_both_sides_agree() {
@@ -1800,7 +1800,7 @@ mod tests {
 }
 
 /// End to end: two Theater adapters on the real lobby WebSocket and the real DTLS relay of an in-process
-/// `mp_server`, with UDP sockets standing in for each game's tunnel and voice sockets.
+/// `mercs2_mp_server`, with UDP sockets standing in for each game's tunnel and voice sockets.
 #[cfg(test)]
 mod e2e {
     use super::*;
@@ -1808,7 +1808,7 @@ mod e2e {
     use crate::log::capture;
     use crate::relay::{AliasPlan, ShimFactory, ShimSettings};
     use crate::testserver::{TestServer, wait};
-    use plasma_proto::frame::{self, Frame};
+    use mercs2_plasma_proto::frame::{self, Frame};
     use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
 
     struct Side {

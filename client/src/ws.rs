@@ -1,4 +1,4 @@
-//! The lobby WebSocket (`GET <base>/v1/ws`, `mp_api::ws`) on its own thread.
+//! The lobby WebSocket (`GET <base>/v1/ws`, `mercs2_mp_api::ws`) on its own thread.
 //!
 //! Transport: the same TLS policy as the REST client ([`crate::tls`]: TLS ≥ 1.2, SNI, chain verification
 //! against the embedded Mozilla bundle, hostname verification), `Authorization: Bearer <session token>` on
@@ -24,8 +24,8 @@ use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use mp_api::ApiError;
-use mp_api::ws::{ClientFrame, Push, Request, Response, ServerFrame};
+use mercs2_mp_api::ApiError;
+use mercs2_mp_api::ws::{ClientFrame, Push, Request, Response, ServerFrame};
 use openssl::ssl::{SslConnector, SslStream};
 use tungstenite::client::IntoClientRequest;
 use tungstenite::{HandshakeError, Message, WebSocket};
@@ -299,7 +299,7 @@ fn inbound(shared: &Shared, log: &Logger, msg: Message) -> Result<(), String> {
         Message::Binary(_) | Message::Frame(_) => return Err("the server sent a non-text frame".into()),
     };
     let frame: ServerFrame =
-        serde_json::from_str(text.as_str()).map_err(|e| format!("server frame is not mp_api v1 JSON ({e}): {}", text.as_str()))?;
+        serde_json::from_str(text.as_str()).map_err(|e| format!("server frame is not mercs2_mp_api v1 JSON ({e}): {}", text.as_str()))?;
     let (id, result) = match frame {
         ServerFrame::Reply { id, response } => (id, Ok(response)),
         ServerFrame::Error { id, error } => (id, Err(error)),
@@ -327,8 +327,8 @@ fn inbound(shared: &Shared, log: &Logger, msg: Message) -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::testserver::{TestServer, wait};
-    use mp_api::ws::{CreateGame, Joinability, Privacy};
-    use mp_api::{ErrorCode, GameId};
+    use mercs2_mp_api::ws::{CreateGame, Joinability, Privacy};
+    use mercs2_mp_api::{ErrorCode, GameId};
 
     fn reply(l: &mut dyn Lobby, id: u64) -> Result<Response, ApiError> {
         wait("a reply", || {

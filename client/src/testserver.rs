@@ -1,4 +1,4 @@
-//! Test-only: the real `mp_server` started in-process (proxied TLS mode, generated self-signed
+//! Test-only: the real `mercs2_mp_server` started in-process (proxied TLS mode, generated self-signed
 //! certificates, ephemeral HTTPS port, a free UDP port for the relay that is also its advertised port) plus
 //! helpers that log in through this crate's own REST client and open its own lobby WebSocket.
 
@@ -6,8 +6,8 @@ use std::net::{SocketAddr, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use mp_api::rest::{ClientInfo, CreateAccount, CreateSession};
-use mp_server::config::*;
+use mercs2_mp_api::rest::{ClientInfo, CreateAccount, CreateSession};
+use mercs2_mp_server::config::*;
 use openssl::asn1::Asn1Time;
 use openssl::bn::{BigNum, MsbOption};
 use openssl::ec::{EcGroup, EcKey};
@@ -17,8 +17,8 @@ use openssl::pkey::{PKey, Private};
 use openssl::x509::extension::SubjectAlternativeName;
 use openssl::x509::{X509, X509NameBuilder};
 
-use mp_api::ApiError;
-use mp_api::ws::{Push, Request, Response};
+use mercs2_mp_api::ApiError;
+use mercs2_mp_api::ws::{Push, Request, Response};
 
 use crate::config::BaseUrl;
 use crate::lobby::{Lobby, LobbyEvent};
@@ -119,7 +119,7 @@ impl TestServer {
             let _dir = dir;
             let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
             rt.block_on(async move {
-                let running = mp_server::start(cfg).await.unwrap();
+                let running = mercs2_mp_server::start(cfg).await.unwrap();
                 tx.send(running.https_addr).unwrap();
                 panic!("test server stopped: {}", running.wait().await);
             })
@@ -163,7 +163,7 @@ impl TestServer {
         let password = format!("password-{name}");
         match rest.execute(&BackendRequest::CreateAccount(CreateAccount { username: name.into(), password: password.clone() })) {
             Ok(BackendReply::AccountCreated(_)) => {}
-            Err(BackendFailure::Api(e)) if e.code == mp_api::ErrorCode::NameTaken => {}
+            Err(BackendFailure::Api(e)) if e.code == mercs2_mp_api::ErrorCode::NameTaken => {}
             other => panic!("create account {name}: {other:?}"),
         }
         let req = CreateSession {

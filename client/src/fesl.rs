@@ -1,6 +1,6 @@
 //! The FESL service, answered in-process.
 //!
-//! Bytes the game Sends on the virtual FESL connection are framed with `plasma_proto` and dispatched by
+//! Bytes the game Sends on the virtual FESL connection are framed with `mercs2_plasma_proto` and dispatched by
 //! service 4CC + `TXN`; replies are queued for the game's Recv. Request fields and the reply fields the
 //! game reads are from `docs/reverse_engineer/multiplayer_txn_catalogue.md` §1 (graded there).
 //!
@@ -26,13 +26,13 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-use mp_api::rest::{ClientInfo, CreateAccount, CreateSession};
-use plasma_proto::fesl::{FeslId, MultipartAssembler, MultipartError, encode_reply};
-use plasma_proto::frame::{self, FrameDecoder, FrameError, Kind};
-use plasma_proto::tagfield::{TagFieldError, TagFieldReader, TagFields};
+use mercs2_mp_api::rest::{ClientInfo, CreateAccount, CreateSession};
+use mercs2_plasma_proto::fesl::{FeslId, MultipartAssembler, MultipartError, encode_reply};
+use mercs2_plasma_proto::frame::{self, FrameDecoder, FrameError, Kind};
+use mercs2_plasma_proto::tagfield::{TagFieldError, TagFieldReader, TagFields};
 use thiserror::Error;
 
-use mp_api::ws::{GameSummary, Joinability, Request, Response};
+use mercs2_mp_api::ws::{GameSummary, Joinability, Request, Response};
 
 use crate::config::{Config, Country, Endpoint};
 use crate::errors::{FeslError, GENERIC_ERROR_CODE, map_api_error};
@@ -407,7 +407,7 @@ impl<B: Backend> FeslAdapter<B> {
             self.reply_error(kind, tid, txn, &FeslError { code: GENERIC_ERROR_CODE, message: msg })?;
             return Ok(None);
         };
-        if let Err(e) = mp_api::rules::check_username(&name).and_then(|_| mp_api::rules::check_password(&password)) {
+        if let Err(e) = mercs2_mp_api::rules::check_username(&name).and_then(|_| mercs2_mp_api::rules::check_password(&password)) {
             self.log.warn(format!("{txn} for {name:?} rejected locally: {e}"));
             self.reply_error(kind, tid, txn, &map_api_error(&e))?;
             return Ok(None);
@@ -466,7 +466,7 @@ impl<B: Backend> FeslAdapter<B> {
         let what = format!("{} {} tid {}", kind_name(p.kind), p.txn, p.tid);
         match (p.what, outcome) {
             (PendingKind::Login { username }, Ok(BackendReply::SessionCreated(s))) => {
-                if s.display_name.len() > mp_api::rules::USERNAME_MAX || s.display_name.is_empty() {
+                if s.display_name.len() > mercs2_mp_api::rules::USERNAME_MAX || s.display_name.is_empty() {
                     return Err(FeslFailure::Protocol(format!(
                         "server display_name {:?} does not fit the game's 31-character buffer",
                         s.display_name
@@ -551,7 +551,7 @@ impl<B: Backend> FeslAdapter<B> {
         Ok(())
     }
 
-    fn pnow_status(&mut self, p: Pnow, result: Result<Response, mp_api::ApiError>) -> Result<(), FeslFailure> {
+    fn pnow_status(&mut self, p: Pnow, result: Result<Response, mercs2_mp_api::ApiError>) -> Result<(), FeslFailure> {
         let mut t = TagFields::new();
         t.set_str("TXN", "Status")?;
         t.set_int("id.id", p.id)?;
@@ -671,9 +671,9 @@ mod tests {
     use crate::config::tests::sample;
     use crate::lobby::fake::FakeProvider;
     use crate::log::capture;
-    use mp_api::rest::{AccountCreated, SessionCreated};
-    use mp_api::{ApiError, ErrorCode, UserId};
-    use plasma_proto::frame::Frame;
+    use mercs2_mp_api::rest::{AccountCreated, SessionCreated};
+    use mercs2_mp_api::{ApiError, ErrorCode, UserId};
+    use mercs2_plasma_proto::frame::Frame;
     use std::time::UNIX_EPOCH;
 
     #[derive(Default)]
@@ -908,14 +908,14 @@ mod tests {
         assert!(e.to_string().contains("lobby: the lobby session ended: the server closed the session"), "{e}");
     }
 
-    fn game(id: i64, version: &str, mission: &str) -> mp_api::ws::GameSummary {
-        mp_api::ws::GameSummary {
-            game_id: mp_api::GameId(id),
+    fn game(id: i64, version: &str, mission: &str) -> mercs2_mp_api::ws::GameSummary {
+        mercs2_mp_api::ws::GameSummary {
+            game_id: mercs2_mp_api::GameId(id),
             name: format!("game {id}"),
-            host: mp_api::ws::UserRef { user_id: UserId(id), name: format!("host{id}") },
+            host: mercs2_mp_api::ws::UserRef { user_id: UserId(id), name: format!("host{id}") },
             max_players: 2,
             players: 1,
-            joinable: mp_api::ws::Joinability::Open,
+            joinable: mercs2_mp_api::ws::Joinability::Open,
             version: version.into(),
             attrs: [("B-U-mission".to_string(), mission.to_string())].into(),
             private: false,
@@ -941,11 +941,11 @@ mod tests {
             vec![(0x8000_0003, "TXN=Start\nid.id=1\nid.partition=/eagames/MERCS2\n\0".to_string())]
         );
         let (id, sent) = r.provider.lobby.last();
-        assert_eq!(sent, mp_api::ws::Request::GamesList { joinable_only: true, room_key: Some("venezuela-42".into()) });
+        assert_eq!(sent, mercs2_mp_api::ws::Request::GamesList { joinable_only: true, room_key: Some("venezuela-42".into()) });
         assert!(r.log.text().contains("pnow Start: fuzzy filters version=\"1.1\""), "{}", r.log.text());
         let mut matching = game(5, "1.1", "m01");
         matching.attrs.insert("B-U-Mission".into(), "m01".into());
-        r.provider.lobby.reply(id, Ok(mp_api::ws::Response::Games(vec![matching, game(6, "1.0", "m01"), game(8, "1.1", "m02")])));
+        r.provider.lobby.reply(id, Ok(mercs2_mp_api::ws::Response::Games(vec![matching, game(6, "1.0", "m01"), game(8, "1.1", "m02")])));
         r.a.pump(r.now).unwrap();
         let f = r.frames();
         assert_eq!(f.len(), 1);
