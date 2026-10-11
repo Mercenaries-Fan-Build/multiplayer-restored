@@ -23,6 +23,7 @@
 //! | EGAM (host, own game) | answered here, not by the server: reply `LID GID`, then EGRQ for the host's own PID (no address) ([`SelfEntry`]) |
 //! | EGRS (host, own PID) | reply `TID`, then EGEG `LID GID PID TICKET UGID EKEY` (no address), whatever `ALLOWED` says |
 //! | PENT (host, own PID) | after its own entry: reply `PID`, not forwarded (LAN `FUN_0099cc60` only echoes `PID`) |
+//! | EGAM by player (`USER`, `TYPE=G`, no `GID`) | `games.list` (current room key) → the game that player hosts → as EGAM with its `GID`; none → `'ngam'` |
 //! | EGAM | `games.join` → reply `LID GID` once the server queued the request; not found → `'ngam'`, full → `'jden'` `REASON=f`, closed → `'jden'` `REASON=c` |
 //! | push join.request | (host) alias for the joiner's slot → EGRQ; while a joiner is already in or awaiting the host's answer: `join.respond` denied `mesh_unsupported`, logged, nothing to the game |
 //! | EGRS | (host) `join.respond` (denial: `host_denied` with the game's integer `REASON`) → reply `TID` |
@@ -115,6 +116,8 @@ enum Pend {
     Gdat { tid: i64, gid: i64 },
     Cgam { tid: i64, tunnel_port: u16, join: String, max_players: u8 },
     Egam { tid: i64, gid: i64, tunnel_port: u16 },
+    /// EGAM by player: the games.list answer that resolves the player's game.
+    EgamByPlayer { tid: i64, user: String, tunnel_port: u16 },
     Egrs { tid: i64, pid: u32, allowed: bool },
     /// The host's ASI denying a join the game was never shown (no relay mesh for a second joiner).
     MeshDeny { join_id: u64 },
@@ -514,7 +517,7 @@ impl TheaterAdapter {
             }
             b"UBRA" => self.reply(q.kind, tid, &t)?,
             b"EGAM" => {
-                let gid = q.need_int("GID")?;
+                let Some(gid) = q.int("GID")? else { return self.egam_by_player(q, tid) };
                 if self.game.as_ref().is_some_and(|g| g.game_id.0 == gid && matches!(g.role, Role::Host { .. })) {
                     return self.self_enter(q, tid, gid);
                 }
@@ -522,9 +525,7 @@ impl TheaterAdapter {
                     return Err(format!("EGAM for game {gid} while already in or joining a game"));
                 }
                 let tunnel_port = q.port("PORT")?;
-                self.joining = Some(Joining { game_id: GameId(gid), join_id: None, tunnel_port });
-                let room_key = self.room_key()?;
-                self.submit(Request::GamesJoin { game_id: GameId(gid), room_key }, Pend::Egam { tid, gid, tunnel_port })?;
+                self.join_game(tid, gid, tunnel_port)?;
             }
             b"EGRS" => {
                 let gid = q.need_int("GID")?;
@@ -619,6 +620,31 @@ impl TheaterAdapter {
         };
         let tunnel_port = q.port("PORT")?;
         self.submit(Request::GamesCreate(create), Pend::Cgam { tid, tunnel_port, join, max_players })
+    }
+
+    fn join_game(&mut self, tid: i64, gid: i64, tunnel_port: u16) -> R {
+        self.joining = Some(Joining { game_id: GameId(gid), join_id: None, tunnel_port });
+        let room_key = self.room_key()?;
+        self.submit(Request::GamesJoin { game_id: GameId(gid), room_key }, Pend::Egam { tid, gid, tunnel_port })
+    }
+
+    /// EGAM by player: the client's builder `0x981080` writes the common EGAM fields (`0x980ed0`: `R-U-*`, `PORT`,
+    /// `R-INT-PORT`, `R-INT-IP`, `GROUP.*`, `R-GROUPID`, `PTYPE`), then `USER` and `R-USER` (the player) and
+    /// `TYPE` (`G` or `P`), and no `GID`. The server finds games by id only, so the game is resolved here: the
+    /// games the current room key shows, the one that player hosts.
+    fn egam_by_player(&mut self, q: &Req, tid: i64) -> R {
+        self.log.info(format!("Theater EGAM by player: {}", q.text()?));
+        let user = q.str("USER")?.ok_or("EGAM without GID or USER")?;
+        let kind = q.need_str("TYPE")?;
+        if kind != "G" {
+            return Err(format!("EGAM by player {user:?} with TYPE={kind}; only TYPE=G (the game the player hosts) is handled"));
+        }
+        if self.game.is_some() || self.joining.is_some() {
+            return Err(format!("EGAM for {user:?}'s game while already in or joining a game"));
+        }
+        let tunnel_port = q.port("PORT")?;
+        let room_key = self.room_key()?;
+        self.submit(Request::GamesList { joinable_only: false, room_key }, Pend::EgamByPlayer { tid, user, tunnel_port })
     }
 
     /// The host's EGAM for the game it hosts. Answered here, not by the server (which already counts the host
@@ -750,6 +776,22 @@ impl TheaterAdapter {
                 for g in &games {
                     let f = self.summary_fields(g)?;
                     self.reply(Kind::new(b"GDAT"), tid, &f)?;
+                }
+            }
+            Pend::EgamByPlayer { tid, user, tunnel_port } => {
+                let Ok(Response::Games(games)) = result else { return Err(unexpected("EGAM by player", &result)) };
+                match games.iter().find(|g| g.host.name.eq_ignore_ascii_case(&user)) {
+                    Some(g) => {
+                        self.log.info(format!("EGAM by player: {user:?} hosts game {}", g.game_id.0));
+                        self.join_game(tid, g.game_id.0, tunnel_port)?;
+                    }
+                    None => {
+                        self.log.info(format!(
+                            "EGAM by player: no game hosted by {user:?} among the {} the current room key shows",
+                            games.len()
+                        ));
+                        self.error_reply(Kind::new(b"EGAM"), NO_SUCH_GAME, tid, &TagFields::new())?;
+                    }
                 }
             }
             Pend::Gdat { tid, gid } => match result {
@@ -1418,6 +1460,43 @@ mod tests {
         hosting(&mut r);
         let e = r.a.on_game_bytes(&req(b"EGRS", "LID=1\nGID=5\nALLOWED=1\nPID=1\nTID=9\n"), r.now).unwrap_err();
         assert!(e.contains("EGRS for PID 1, which has no pending join request"), "{e}");
+    }
+
+    /// EGAM as the client's join-by-player builder (`0x981080`) writes it: common fields, then USER, R-USER, TYPE.
+    const EGAM_BY_PLAYER: &str = "PORT=10000\nR-INT-PORT=6001\nR-INT-IP=192.168.1.5\nPTYPE=P\nUSER=Jen\nR-USER=Jen\nTYPE=G\nTID=6\n";
+
+    fn hosted_by(name: &str, id: i64) -> GameSummary {
+        GameSummary { game_id: GameId(id), host: UserRef { user_id: UserId(8), name: name.into() }, ..summary() }
+    }
+
+    #[test]
+    fn egam_by_player_joins_the_game_that_player_hosts() {
+        let mut r = rig();
+        r.send(b"EGAM", EGAM_BY_PLAYER);
+        assert!(r.log.text().contains("Theater EGAM by player: PORT=10000"), "{}", r.log.text());
+        let sent = r.answer(Ok(Response::Games(vec![hosted_by("Someone", 4), hosted_by("jen", 9)])));
+        assert_eq!(sent, Request::GamesList { joinable_only: false, room_key: Some("venezuela-42".into()) });
+        // Names compare case-insensitively, as the server stores them; then the ordinary join of game 9.
+        let sent = r.answer(Ok(Response::JoinPending { join_id: 3 }));
+        assert_eq!(sent, Request::GamesJoin { game_id: GameId(9), room_key: Some("venezuela-42".into()) });
+        assert_eq!(r.frames(), vec![g("EGAM", "ok", "LID=1\nGID=9\nTID=6\n")]);
+        assert!(r.log.text().contains("EGAM by player: \"Jen\" hosts game 9"));
+
+        // Nobody by that name hosts a visible game: 'ngam', as for a GID that does not exist.
+        let mut r = rig();
+        r.send(b"EGAM", EGAM_BY_PLAYER);
+        r.answer(Ok(Response::Games(vec![hosted_by("Someone", 4)])));
+        assert_eq!(r.frames(), vec![g("EGAM", "ngam", "TID=6\n")]);
+        let sent = r.lobby.take_sent();
+        assert!(matches!(&sent[..], [(_, Request::GamesList { .. })]), "only the list, no join without a game: {sent:?}");
+
+        // TYPE=P and an EGAM with neither GID nor USER fail the connection.
+        let mut r = rig();
+        let e = r.a.on_game_bytes(&req(b"EGAM", &EGAM_BY_PLAYER.replace("TYPE=G", "TYPE=P")), r.now).unwrap_err();
+        assert!(e.contains("TYPE=P") && e.contains("only TYPE=G"), "{e}");
+        let mut r = rig();
+        let e = r.a.on_game_bytes(&req(b"EGAM", "PORT=10000\nTID=6\n"), r.now).unwrap_err();
+        assert_eq!(e, "EGAM without GID or USER");
     }
 
     #[test]
