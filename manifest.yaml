@@ -1,0 +1,72 @@
+format: 2
+
+shipment:
+  name: multiplayer-restored
+  title: Multiplayer Restored
+  version: 0.1.0
+  target: retail
+  authors: [Austin Kregel]
+  description: Online play against a self-hostable server; FESL is answered in-process and the server is reached over HTTPS.
+  license: MIT
+  tags: [multiplayer, online, network]
+
+contributions:
+  # The client ASI (built from client/ by client/scripts/build_asi.sh). It locates the ProtoSSL entry
+  # points by byte signature (exactly one match each in .text; any other count stops the game with a
+  # message), so the addresses below are the ones those signatures resolve to in mercs2_nodrm_v3.exe and
+  # mercs2_unpacked.exe, and in the retail v1.1 dump — verified by the crate's signature tests. ProtoSSLCreate is
+  # resolved as part of the build check but not detoured.
+  - kind: native_hook
+    target: retail
+    plugin: src/multiplayer_restored.asi
+    touches:
+      - ProtoSSLConnect
+      - ProtoSSLDisconnect
+      - ProtoSSLDestroy
+      - ProtoSSLUpdate
+      - ProtoSSLSend
+      - ProtoSSLRecv
+      - ProtoSSLStat
+      - ScriptHostRegisterNamespaces
+      - "0x009D9A00"
+      - "0x009D9B80"
+      - "0x009D9950"
+      - "0x009DA500"
+      - "0x009DA8C0"
+      - "0x009DA960"
+      - "0x009DAA30"
+      # Retail v1.1 (SecuROM; genuine_patched_unpacked.exe dump): the same code 0xF0 higher.
+      - "0x009D9AF0"
+      - "0x009D9C70"
+      - "0x009D9A40"
+      - "0x009DA5F0"
+      - "0x009DA9B0"
+      - "0x009DAA50"
+      - "0x009DAB20"
+      # The script host's namespace walker (client/src/lua/signature.rs): detoured to register the `Mp`
+      # Lua namespace on every lua_State the host creates. nodrm_v3 / unpacked, then the v1.1 dump.
+      - "0x005A2C40"
+      - "0x005A2C30"
+    # Leading bytes of each signature up to its first wildcard (client/src/signature.rs).
+    signature_guard:
+      "0x009D9A00": "53 8B 5C 24 0C 56 8B 74 24 0C 8B C6 E8"
+      "0x009D9B80": "8B 44 24 04 53 33 DB 39 98 24 01 00 00 0F 95 C3 E8"
+      "0x009D9950": "53 56 8B 74 24 0C 33 DB 8B C6 E8"
+      "0x009DA500": "53 55 56 8B 74 24 10 8B AE 24 01 00 00 57 BF 01 00 00 00 33 DB 39 BE 1C 01 00 00"
+      "0x009DA8C0": "53 55 8B 6C 24 10 56 8B 74 24 18 83 CB FF 85 F6 57 8B 7C 24 14"
+      "0x009DA960": "53 8B 5C 24 10 55 8B 6C 24 0C 56 8B B5 24 01 00 00 57 83 CF FF"
+      "0x009DAA30": "56 8B 74 24 0C 83 C8 FF 81 FE 6B 63 6F 73 75 20"
+      "0x009D9AF0": "53 8B 5C 24 0C 56 8B 74 24 0C 8B C6 E8"
+      "0x009D9C70": "8B 44 24 04 53 33 DB 39 98 24 01 00 00 0F 95 C3 E8"
+      "0x009D9A40": "53 56 8B 74 24 0C 33 DB 8B C6 E8"
+      "0x009DA5F0": "53 55 56 8B 74 24 10 8B AE 24 01 00 00 57 BF 01 00 00 00 33 DB 39 BE 1C 01 00 00"
+      "0x009DA9B0": "53 55 8B 6C 24 10 56 8B 74 24 18 83 CB FF 85 F6 57 8B 7C 24 14"
+      "0x009DAA50": "53 8B 5C 24 10 55 8B 6C 24 0C 56 8B B5 24 01 00 00 57 83 CF FF"
+      "0x009DAB20": "56 8B 74 24 0C 83 C8 FF 81 FE 6B 63 6F 73 75 20"
+      "0x005A2C40": "53 55 8B 6C 24 0C 56 8B 75 10 57 68"
+      "0x005A2C30": "53 55 8B 6C 24 0C 56 8B 75 10 57 68"
+
+  # Required configuration; the ASI reads it from its own folder and refuses to start without it.
+  - kind: place_file
+    file: src/multiplayer_restored.ini
+    dest: scripts

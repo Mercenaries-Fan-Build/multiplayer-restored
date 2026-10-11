@@ -1,0 +1,57 @@
+[package]
+name = "multiplayer_restored"
+version = "0.1.0"
+description = "Mercenaries 2 multiplayer client ASI: terminates FESL/Theater locally and talks to the multiplayer server over HTTPS"
+edition = "2024"
+publish = false
+
+# Standalone package: not a member of src/multiplayer-server's workspace.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+plasma_proto = { path = "../../../src/multiplayer-server/crates/plasma_proto" }
+mp_api = { path = "../../../src/multiplayer-server/crates/mp_api" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+sha2 = "0.10"
+httparse = "1"
+openssl = { version = "0.10", features = ["vendored"] }
+# Pins the vendored OpenSSL to the 3.x series (openssl-src 300.x builds OpenSSL 3.x).
+openssl-src = "300"
+# `SSL_ctrl(DTLS_CTRL_HANDLE_TIMEOUT)`: DTLS handshake retransmission over the relay shim's memory BIO
+# (the `openssl` crate has no wrapper for `DTLSv1_handle_timeout`).
+openssl-sys = "0.9"
+# `ForeignTypeRef::as_ptr` on `SslRef` for that call (the trait `openssl` 0.10 implements).
+foreign-types = "0.3"
+# Lobby WebSocket client (RFC 6455 framing + client handshake) over the OpenSSL stream.
+tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
+
+[target.'cfg(windows)'.dependencies]
+minhook = "0.9"
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Threading",
+    "Win32_System_SystemServices",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Networking_WinSock",
+    "Win32_System_IO",
+] }
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1
+
+[dev-dependencies]
+base64 = "0.22"
+# The real server, started in-process by the WebSocket / relay integration tests.
+mp_server = { path = "../../../src/multiplayer-server/crates/mp_server" }
+tokio = { version = "1", features = ["full"] }
+tempfile = "3"
