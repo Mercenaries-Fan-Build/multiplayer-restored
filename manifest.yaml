@@ -5,10 +5,16 @@ shipment:
   title: Multiplayer Restored
   version: 0.1.0
   target: retail
-  authors: [Austin Kregel]
+  authors: [Mercenaries Fan Build]
   description: Online play against a self-hostable server; FESL is answered in-process and the server is reached over HTTPS.
   license: MIT
   tags: [multiplayer, online, network]
+
+load:
+  requires:
+    # The ASI imports m2-sdk.dll (its hooks go through the SDK's single MinHook instance); the m2-sdk
+    # Shipment places that DLL in the game root. Without it Windows refuses to load the ASI at all.
+    - { shipment: m2-sdk, version: "^0.3" }
 
 contributions:
   # The client ASI (built from client/ by client/scripts/build_asi.sh). It locates the ProtoSSL entry

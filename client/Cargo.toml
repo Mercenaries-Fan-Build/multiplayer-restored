@@ -31,7 +31,6 @@ foreign-types = "0.3"
 tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
 
 [target.'cfg(windows)'.dependencies]
-minhook = "0.9"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_System_LibraryLoader",

@@ -25,6 +25,14 @@ runs:
       shell: bash
       run: bash client/scripts/fetch_dw2_libgcc.sh
 
+    # The ASI imports m2-sdk.dll; this fetches its import library for the release client/m2-sdk.version
+    # names, verified against the sha256 GitHub records for the asset.
+    - name: Fetch the m2-sdk import library
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: bash client/scripts/fetch_m2_sdk.sh
+
     - name: Build the ASI
       shell: bash
       run: bash client/scripts/build_asi.sh

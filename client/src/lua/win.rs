@@ -22,7 +22,6 @@ use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use minhook::MinHook;
 use windows_sys::Win32::System::Memory::{MEM_COMMIT, MEMORY_BASIC_INFORMATION, PAGE_GUARD, PAGE_NOACCESS, VirtualQuery};
 
 use super::bindings::{self, NAMESPACE, Ret};
@@ -213,11 +212,8 @@ pub fn install(code: &'static [u8], log: &Logger, fatal_path: Fatal) {
         fatal("Lua bindings installed twice");
     }
     let walker = sites.va(LuaFn::RegisterNamespaces) as usize as *mut c_void;
-    let tramp = unsafe { MinHook::create_hook(walker, hook_register_namespaces as *mut c_void) }
-        .unwrap_or_else(|e| fatal(&format!("MinHook create_hook ScriptHostRegisterNamespaces at {walker:p}: {e:?}")));
-    ORIG_WALKER.store(tramp as usize, Ordering::Release);
-    unsafe { MinHook::enable_hook(walker) }
-        .unwrap_or_else(|e| fatal(&format!("MinHook enable_hook ScriptHostRegisterNamespaces at {walker:p}: {e:?}")));
+    crate::m2sdk::ffi::attach(walker, hook_register_namespaces as *mut c_void, Some(&ORIG_WALKER), "ScriptHostRegisterNamespaces")
+        .unwrap_or_else(|e| fatal(&e));
     log.info(format!("Lua detour installed: ScriptHostRegisterNamespaces at {walker:p}"));
 
     let flag = sites.host() + HOST_INITIALISED;
@@ -230,9 +226,10 @@ pub fn install(code: &'static [u8], log: &Logger, fatal_path: Fatal) {
         while REGISTERED.load(Ordering::Acquire) == 0 {
             if Instant::now() >= deadline {
                 fatal(&format!(
-                    "the game created its Lua state before the multiplayer ASI could hook it (script host {:#x} \
-                     was already initialised), so the Lua namespace {NAMESPACE} would be missing. Load the ASI \
-                     earlier (it must be loaded before the front end starts).",
+                    "the game created its Lua state before the multiplayer ASI hooked it (script host {:#x} was \
+                     already initialised), so the Lua namespace {NAMESPACE} would be missing. The ASI's start-up \
+                     reached the hook too late; the timestamps in multiplayer_restored.log show which step took \
+                     the time — please report it with that log.",
                     sites.host()
                 ));
             }

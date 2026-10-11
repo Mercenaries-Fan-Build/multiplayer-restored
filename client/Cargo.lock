@@ -1167,16 +1167,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 
 [[package]]
-name = "minhook"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "455e088cb1600ffa5f1524c9702c9eeb0ba3604e0f4932efa165b99973272a8d"
-dependencies = [
- "cc",
- "tracing",
-]
-
-[[package]]
 name = "minimal-lexical"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1203,7 +1193,6 @@ dependencies = [
  "mercs2_mp_api",
  "mercs2_mp_server",
  "mercs2_plasma_proto",
- "minhook",
  "openssl",
  "openssl-src",
  "openssl-sys",

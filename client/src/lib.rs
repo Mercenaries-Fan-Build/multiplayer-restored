@@ -11,7 +11,8 @@
 //! * services: [`fesl`] (+ [`errors`] for ApiError → FESL error codes, [`curtime`]) and [`theater`];
 //! * backend: [`http`], [`tls`], [`worker`], [`session`]; after login the lobby WebSocket ([`lobby`],
 //!   [`ws`]) and, per game, the DTLS relay shim ([`relay`]) that carries gameplay and voice UDP;
-//! * runtime: [`config`], [`log`], and the Windows-only hook layer in `win`.
+//! * runtime: [`config`], [`log`], [`m2sdk`] (the shared m2-sdk layer every detour goes through), and the
+//!   Windows-only hook layer in `win`.
 
 pub mod build_id;
 pub mod config;
@@ -22,6 +23,7 @@ pub mod http;
 pub mod lobby;
 pub mod log;
 pub mod lua;
+pub mod m2sdk;
 pub mod pe;
 pub mod protossl;
 pub mod relay;

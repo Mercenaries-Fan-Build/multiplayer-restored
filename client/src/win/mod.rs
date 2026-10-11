@@ -6,15 +6,18 @@
 //!    once in the main module's `.text` (SecuROM decrypts `.text` at run time, so early scans find
 //!    nothing); pages that are not committed+readable count as "not yet";
 //! 3. hash `.text` (the build identity, [`crate::build_id`]) before anything is patched;
-//! 4. create the runtime (worker thread, connection table), then create and enable the MinHook detours.
+//! 4. detour the script host's namespace walker at once ([`crate::lua::win::install`]): the game creates its
+//!    Lua state early in start-up, and the `Mp` namespace must be registered on it;
+//! 5. build the TLS connector, worker thread and runtime, then detour ProtoSSL (the game reaches
+//!    ProtoSSLConnect only from the front end, long after start-up).
 //!
-//! Any failure in 1–4 is fatal: it is logged (when the log is open), shown in a message box, and the
+//! Each step is logged as it finishes, so the log's timestamps show where start-up spends its time.
+//!
+//! Any failure in 1–5 is fatal: it is logged (when the log is open), shown in a message box, and the
 //! process exits — the game never runs with its network stack unhooked.
 //!
-//! Hook library: the `minhook` crate (MinHook 1.3 C sources built by `cc`, the same library the
-//! project's C ASIs use). It relocates the overwritten prologue into a trampoline with its own x86
-//! decoder and suspends the process's other threads while it writes the jumps (`MH_EnableHook`). `retour`
-//! 0.3.1 does not compile for i686 on current stable Rust (`extern "win64"` is rejected on x86).
+//! Hook library: `m2-sdk.dll` ([`crate::m2sdk`]), the shared layer that holds the process's one MinHook
+//! instance. Its version is checked against the one this ASI was built against before anything is hooked.
 
 use std::ffi::{CStr, c_char, c_void};
 use std::path::{Path, PathBuf};
@@ -22,7 +25,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use minhook::MinHook;
 use windows_sys::Win32::Foundation::HMODULE;
 use windows_sys::Win32::System::Diagnostics::Debug::OutputDebugStringW;
 use windows_sys::Win32::System::LibraryLoader::{DisableThreadLibraryCalls, GetModuleFileNameW, GetModuleHandleW};
@@ -242,25 +244,19 @@ fn wait_for_image(cfg: &Config, log: &Logger) -> Image {
 
 fn install_hooks(img: &Image, log: &Logger) {
     let target = |f: ProtoSslFn| img.resolved.va(f) as usize as *mut c_void;
-    let hooks: [(ProtoSslFn, *mut c_void); 7] = [
-        (ProtoSslFn::Connect, hook_connect as *mut c_void),
-        (ProtoSslFn::Disconnect, hook_disconnect as *mut c_void),
-        (ProtoSslFn::Destroy, hook_destroy as *mut c_void),
-        (ProtoSslFn::Update, hook_update as *mut c_void),
-        (ProtoSslFn::Send, hook_send as *mut c_void),
-        (ProtoSslFn::Recv, hook_recv as *mut c_void),
-        (ProtoSslFn::Stat, hook_stat as *mut c_void),
+    // Disconnect and Destroy call the original; the SDK writes their trampolines before enabling each hook.
+    let hooks: [(ProtoSslFn, *mut c_void, Option<&AtomicUsize>); 7] = [
+        (ProtoSslFn::Connect, hook_connect as *mut c_void, None),
+        (ProtoSslFn::Disconnect, hook_disconnect as *mut c_void, Some(&ORIG_DISCONNECT)),
+        (ProtoSslFn::Destroy, hook_destroy as *mut c_void, Some(&ORIG_DESTROY)),
+        (ProtoSslFn::Update, hook_update as *mut c_void, None),
+        (ProtoSslFn::Send, hook_send as *mut c_void, None),
+        (ProtoSslFn::Recv, hook_recv as *mut c_void, None),
+        (ProtoSslFn::Stat, hook_stat as *mut c_void, None),
     ];
-    for (f, detour) in hooks {
-        let tramp = unsafe { MinHook::create_hook(target(f), detour) }
-            .unwrap_or_else(|e| fatal(Some(log), &format!("MinHook create_hook {} at {:#x}: {e}", f.name(), img.resolved.va(f))));
-        match f {
-            ProtoSslFn::Disconnect => ORIG_DISCONNECT.store(tramp as usize, Ordering::Release),
-            ProtoSslFn::Destroy => ORIG_DESTROY.store(tramp as usize, Ordering::Release),
-            _ => {}
-        }
+    for (f, detour, orig) in hooks {
+        crate::m2sdk::ffi::attach(target(f), detour, orig, f.name()).unwrap_or_else(|e| fatal(Some(log), &e));
     }
-    unsafe { MinHook::enable_all_hooks() }.unwrap_or_else(|e| fatal(Some(log), &format!("MinHook enable: {e}")));
 }
 
 fn module_path(hinst: HMODULE) -> PathBuf {
@@ -308,14 +304,26 @@ fn init(hinst: usize) {
         crate::tls::CA_BUNDLE_MOZILLA_DATE
     ));
 
+    let sdk = unsafe { crate::m2sdk::ffi::m2_version_num() };
+    crate::m2sdk::compatible(sdk, env!("M2_SDK_VERSION")).unwrap_or_else(|e| fatal(Some(&log), &e));
+    log.info(format!(
+        "m2-sdk.dll {}.{}.{} (built against {})",
+        sdk / 10000,
+        sdk / 100 % 100,
+        sdk % 100,
+        env!("M2_SDK_VERSION")
+    ));
+
     let img = wait_for_image(&cfg, &log);
     let build = crate::build_id::sha256_hex(img.code);
     for f in ProtoSslFn::ALL {
         log.info(format!("signature {} -> {:#x}", f.name(), img.resolved.va(f)));
     }
     log.info(format!("build .text sha256 {build}"));
+    crate::lua::win::install(img.code, &log, fatal);
 
     let connector = crate::tls::mozilla_connector().unwrap_or_else(|e| fatal(Some(&log), &format!("TLS setup: {e}")));
+    log.info("TLS connector ready (CA bundle loaded)");
     let lobby = WsLobbyProvider::new(
         WsSettings {
             base: cfg.server.clone(),
@@ -364,9 +372,9 @@ fn init(hinst: usize) {
     if RUNTIME.set(Runtime { cfg, log: log.clone(), factory, table: Mutex::new(Table::new()) }).is_err() {
         fatal(Some(&log), "runtime initialised twice");
     }
+    log.info("runtime ready (worker thread, connection table)");
     install_hooks(&img, &log);
     log.info("ProtoSSL detours installed: Connect Disconnect Destroy Update Send Recv Stat");
-    crate::lua::win::install(img.code, &log, fatal);
 }
 
 /// # Safety
