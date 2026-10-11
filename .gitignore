@@ -1,0 +1,9 @@
+# qm output. Built artifacts are reproducible from the manifest and src/, and a committed WAD is a
+# 2 MB binary that will conflict on every merge.
+build/
+
+# Built from client/ by client/scripts/build_asi.sh (locally, and by CI before lint and release).
+src/multiplayer_restored.asi
+
+.DS_Store
+Thumbs.db

@@ -1313,9 +1313,9 @@ mod tests {
         assert!(r.log.text().contains("GDAT by player"));
     }
 
-    /// The host's EGAM for its own game, with the fields and order of the live 2026-10-11 capture (GID and TID
-    /// adjusted to this rig). The handling reads only `GID` and `TID`.
-    const SELF_EGAM: &str = "PORT=10000\nR-INT-PORT=6001\nR-INT-IP=192.168.3.172\nPTYPE=P\nLID=1\nGID=5\nTID=8\n";
+    /// The host's EGAM for its own game, with the fields and order of the live 2026-10-11 capture (GID, TID and
+    /// the LAN address adjusted to this rig). The handling reads only `GID` and `TID`.
+    const SELF_EGAM: &str = "PORT=10000\nR-INT-PORT=6001\nR-INT-IP=192.168.1.5\nPTYPE=P\nLID=1\nGID=5\nTID=8\n";
 
     #[test]
     fn host_enters_its_own_game_locally_like_the_lan_emulator() {
@@ -1337,7 +1337,7 @@ mod tests {
         );
         assert!(r.lobby.take_sent().is_empty(), "the server already counts the host in its game");
         assert!(r.relay_events().is_empty(), "no relay peer for the host itself");
-        assert!(r.log.text().contains("Theater EGAM from the host for its own game 5: PORT=10000 R-INT-PORT=6001 R-INT-IP=192.168.3.172 PTYPE=P LID=1 GID=5 TID=8"), "{}", r.log.text());
+        assert!(r.log.text().contains("Theater EGAM from the host for its own game 5: PORT=10000 R-INT-PORT=6001 R-INT-IP=192.168.1.5 PTYPE=P LID=1 GID=5 TID=8"), "{}", r.log.text());
 
         // EGRS reply TID, then EGEG LID GID PID TICKET UGID EKEY (FUN_009a0e80 → FUN_0099ca30): no address.
         r.send(b"EGRS", "LID=1\nGID=5\nALLOWED=1\nPID=1\nTID=9\n");
