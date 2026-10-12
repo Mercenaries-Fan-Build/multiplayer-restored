@@ -161,6 +161,10 @@ struct InGame {
     relay: Box<dyn RelayLink>,
     /// When this adapter first saw the relay's orderly close.
     relay_closed_at: Option<Instant>,
+    /// The host's RGAM is with the lobby (games.close).
+    closing: bool,
+    /// The TID of the host's own ECNL that arrived while its RGAM was with the lobby; answered after RGAM.
+    ecnl_after_close: Option<i64>,
 }
 
 struct Joining {
@@ -184,6 +188,8 @@ pub struct TheaterAdapter {
     pings_unanswered: u32,
     joining: Option<Joining>,
     game: Option<InGame>,
+    /// The game this host last closed with RGAM, whose own ECNL is answered here.
+    closed: Option<GameId>,
 }
 
 fn kind_name(k: Kind) -> String {
@@ -291,6 +297,7 @@ impl TheaterAdapter {
             pings_unanswered: 0,
             joining: None,
             game: None,
+            closed: None,
         }
     }
 
@@ -578,6 +585,18 @@ impl TheaterAdapter {
             }
             b"ECNL" => {
                 let gid = q.need_int("GID")?;
+                // The host leaves its own game after closing it: RGAM, then ECNL. games.close removed every
+                // player, so players.leave would find no game; the answer follows RGAM's.
+                if let Some(g) = self.game.as_mut().filter(|g| g.game_id.0 == gid && g.closing) {
+                    if g.ecnl_after_close.replace(tid).is_some() {
+                        return Err(format!("a second ECNL for game {gid} while its RGAM is with the lobby"));
+                    }
+                    return Ok(());
+                }
+                if self.closed == Some(GameId(gid)) {
+                    let t = Self::lid_gid(gid)?;
+                    return self.reply(Kind::new(b"ECNL"), tid, &t);
+                }
                 let in_it = self.game.as_ref().is_some_and(|g| g.game_id.0 == gid) || self.joining.as_ref().is_some_and(|j| j.game_id.0 == gid);
                 if !in_it {
                     return Err(format!("ECNL for game {gid}, which this client is neither in nor joining"));
@@ -587,7 +606,7 @@ impl TheaterAdapter {
             }
             b"RGAM" => {
                 let gid = q.need_int("GID")?;
-                self.hosted(gid, "RGAM")?;
+                self.hosted(gid, "RGAM")?.closing = true;
                 self.submit(Request::GamesClose { game_id: GameId(gid) }, Pend::Rgam { tid, gid })?;
             }
             _ => return Err(format!("Theater {} is not implemented by multiplayer_restored {}", q.name(), crate::ASI_VERSION)),
@@ -820,7 +839,10 @@ impl TheaterAdapter {
                     },
                     relay,
                     relay_closed_at: None,
+                    closing: false,
+                    ecnl_after_close: None,
                 });
+                self.closed = None;
                 let mut t = Self::lid_gid(c.game_id.0)?;
                 t.set_int("MAX-PLAYERS", max_players.into()).map_err(tf)?;
                 t.set_str("JOIN", &join).map_err(tf)?;
@@ -912,9 +934,14 @@ impl TheaterAdapter {
             }
             Pend::Rgam { tid, gid } => {
                 let Ok(Response::Ok) = result else { return Err(unexpected("RGAM", &result)) };
+                let ecnl = self.game.as_ref().and_then(|g| g.ecnl_after_close);
                 self.end_game("closed by the host (RGAM)");
+                self.closed = Some(GameId(gid));
                 let t = Self::lid_gid(gid)?;
                 self.reply(Kind::new(b"RGAM"), tid, &t)?;
+                if let Some(ecnl_tid) = ecnl {
+                    self.reply(Kind::new(b"ECNL"), ecnl_tid, &t)?;
+                }
             }
             Pend::Update { what } => {
                 let Ok(Response::Ok) = result else { return Err(unexpected(what, &result)) };
@@ -1015,7 +1042,16 @@ impl TheaterAdapter {
         }
         let mut relay = self.relays.start(a.game_id, &a.relay, j.tunnel_port)?;
         let peer = relay.add_peer(a.host_slot)?;
-        self.game = Some(InGame { game_id: a.game_id, pid: a.pid, role: Role::Joiner, relay, relay_closed_at: None });
+        self.game = Some(InGame {
+            game_id: a.game_id,
+            pid: a.pid,
+            role: Role::Joiner,
+            relay,
+            relay_closed_at: None,
+            closing: false,
+            ecnl_after_close: None,
+        });
+        self.closed = None;
         let mut t = Self::lid_gid(a.game_id.0)?;
         t.set_int("PID", a.pid.into()).map_err(tf)?;
         t.set_str("TICKET", ticket(a.join_id)).map_err(tf)?;
@@ -1602,6 +1638,32 @@ mod tests {
         assert_eq!(r.answer(Ok(Response::Ok)), Request::GamesClose { game_id: GameId(5) });
         assert_eq!(r.frames(), vec![g("RGAM", "ok", "LID=1\nGID=5\nTID=16\n")]);
         assert_eq!(r.relay_events(), vec!["end"]);
+    }
+
+    #[test]
+    fn the_hosts_own_ecnl_after_rgam_is_answered_here() {
+        let mut r = rig();
+        hosting(&mut r);
+        r.frames();
+        // RGAM then ECNL, both before the close is answered: ECNL goes nowhere and is answered after RGAM.
+        r.send(b"RGAM", "LID=1\nGID=5\nTID=16\n");
+        r.send(b"ECNL", "LID=1\nGID=5\nTID=17\n");
+        assert_eq!(r.answer(Ok(Response::Ok)), Request::GamesClose { game_id: GameId(5) });
+        assert_eq!(r.frames(), vec![g("RGAM", "ok", "LID=1\nGID=5\nTID=16\n"), g("ECNL", "ok", "LID=1\nGID=5\nTID=17\n")]);
+        // An ECNL for the closed game after the close is answered here too.
+        r.send(b"ECNL", "LID=1\nGID=5\nTID=18\n");
+        assert_eq!(r.frames(), vec![g("ECNL", "ok", "LID=1\nGID=5\nTID=18\n")]);
+        // A game this client never closed is still refused.
+        assert!(r.a.on_game_bytes(&req(b"ECNL", "LID=1\nGID=6\nTID=19\n"), r.now).is_err());
+    }
+
+    #[test]
+    fn the_hosts_second_ecnl_while_rgam_is_pending_fails() {
+        let mut r = rig();
+        hosting(&mut r);
+        r.send(b"RGAM", "LID=1\nGID=5\nTID=16\n");
+        r.send(b"ECNL", "LID=1\nGID=5\nTID=17\n");
+        assert!(r.a.on_game_bytes(&req(b"ECNL", "LID=1\nGID=5\nTID=18\n"), r.now).is_err());
     }
 
     #[test]
