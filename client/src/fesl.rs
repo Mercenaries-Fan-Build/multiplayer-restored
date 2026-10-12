@@ -166,6 +166,9 @@ pub struct FeslAdapter<B: Backend> {
     pnow: HashMap<u64, Pnow>,
     next_pnow_id: i64,
     rank_get: HashMap<u64, RankGet>,
+    /// Requests that arrived before fsys Hello, handled in order once Hello gives the fragment size their
+    /// replies need. After a dropped connection the game reconnects and sends its unanswered request first.
+    before_hello: Vec<(Kind, u32, Vec<u8>)>,
 }
 
 fn openssl_random(buf: &mut [u8]) -> Result<(), String> {
@@ -207,6 +210,7 @@ impl<B: Backend> FeslAdapter<B> {
             pnow: HashMap::new(),
             next_pnow_id: 1,
             rank_get: HashMap::new(),
+            before_hello: Vec::new(),
         }
     }
 
@@ -326,6 +330,11 @@ impl<B: Backend> FeslAdapter<B> {
         let txn = r
             .get_str("TXN")?
             .ok_or_else(|| FeslFailure::Protocol(format!("{kind:?} frame tid {tid} without TXN")))?;
+        if self.fragment_size.is_none() && (kind != FSYS || txn != "Hello") {
+            self.log.info(format!("{} {txn} tid {tid} arrived before fsys Hello; held until Hello", kind_name(kind)));
+            self.before_hello.push((kind, tid, payload.to_vec()));
+            return Ok(());
+        }
         let mut t = TagFields::new();
         t.set_str("TXN", &txn)?;
         match (&kind.0, txn.as_str()) {
@@ -354,6 +363,9 @@ impl<B: Backend> FeslAdapter<B> {
                 self.reply(kind, tid, &t, &txn)?;
                 self.push_memcheck()?;
                 self.next_keepalive = Some(now + s.keepalive);
+                for (k, held_tid, held) in std::mem::take(&mut self.before_hello) {
+                    self.dispatch(k, held_tid, &held, now)?;
+                }
             }
             // The client's answer to our MemCheck push, its own keepalive, and its sign-off: no reply.
             (b"fsys", "MemCheck") | (b"fsys", "Ping") => {}
@@ -408,7 +420,10 @@ impl<B: Backend> FeslAdapter<B> {
             (b"acct", "AddAccount") => self.add_account(kind, tid, &txn, &r)?,
             _ => {
                 let msg = format!("{} {txn} is not implemented by multiplayer_restored {}", kind_name(kind), crate::ASI_VERSION);
-                self.log.error(&msg);
+                // The whole request goes to the log: for rank UpdateStats the meaning of `u.%d.s.%d.ut` comes
+                // from what the game sends (its builder FUN_0097fed0 is reached only through the rank
+                // object's vtable, so no static call site shows the values).
+                self.log.error(format!("{msg}; request: {:?}", String::from_utf8_lossy(payload).trim_end_matches('\0')));
                 self.reply_error(kind, tid, &txn, &FeslError { code: GENERIC_ERROR_CODE, message: msg.clone() })?;
             }
         }
@@ -1282,13 +1297,22 @@ mod tests {
         assert_eq!(f[0].kind, Kind::new(b"rank"));
         assert!(text(&f[0]).contains("errorCode=99\nlocalizedMessage=\"rank UpdateStats is not implemented"));
         assert!(r.log.text().contains("ERROR rank UpdateStats is not implemented"));
+        assert!(r.log.text().contains("; request: \"TXN=UpdateStats\\nu.[]=0\\n\""), "{}", r.log.text());
     }
 
     #[test]
-    fn request_before_hello_is_a_protocol_failure() {
+    fn requests_before_hello_are_held_until_hello() {
+        // After a dropped connection the game reconnects and sends its unanswered request first.
         let mut r = rig();
-        let e = r.a.on_game_bytes(&req(b"acct", 1, "TXN=GetTos\n"), r.now).unwrap_err();
-        assert!(e.to_string().contains("before fsys Hello"));
+        r.send(&req(b"rank", 5, "TXN=GetRankedStats\nperiodId=0\nperiodPast=0\nkeys.0=vz\nkeys.[]=1\n"));
+        r.send(&req(b"acct", 6, "TXN=GetTos\n"));
+        assert!(r.frames().is_empty(), "nothing can be answered before the fragment size is known");
+        assert!(r.log.text().contains("rank GetRankedStats tid 5 arrived before fsys Hello; held until Hello"));
+        let f = r.hello();
+        let shown: Vec<(Kind, u32)> = f.iter().map(|f| (f.kind, f.id & 0x00ff_ffff)).collect();
+        assert_eq!(shown, vec![(FSYS, 1), (FSYS, 0), (RANK, 5), (Kind::new(b"acct"), 6)], "Hello, MemCheck, then the held requests in order");
+        assert!(text(&f[2]).contains("rank GetRankedStats before acct Login"));
+        assert!(text(&f[3]).starts_with("TXN=GetTos\ntos="));
     }
 
     #[test]
