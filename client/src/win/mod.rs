@@ -6,8 +6,8 @@
 //!    once in the main module's `.text` (SecuROM decrypts `.text` at run time, so early scans find
 //!    nothing); pages that are not committed+readable count as "not yet";
 //! 3. hash `.text` (the build identity, [`crate::build_id`]) before anything is patched;
-//! 4. detour the script host's namespace walker at once ([`crate::lua::win::install`]): the game creates its
-//!    Lua state early in start-up, and the `Mp` namespace must be registered on it;
+//! 4. add the `Mp` Lua namespace through m2-sdk.dll's Lua host at once ([`crate::lua::win::install`]): the
+//!    game creates its Lua state early in start-up, and `Mp` must be registered on it;
 //! 5. build the TLS connector, worker thread and runtime, then detour ProtoSSL (the game reaches
 //!    ProtoSSLConnect only from the front end, long after start-up).
 //!
@@ -16,8 +16,9 @@
 //! Any failure in 1–5 is fatal: it is logged (when the log is open), shown in a message box, and the
 //! process exits — the game never runs with its network stack unhooked.
 //!
-//! Hook library: `m2-sdk.dll` ([`crate::m2sdk`]), the shared layer that holds the process's one MinHook
-//! instance. Its version is checked against the one this ASI was built against before anything is hooked.
+//! Hook library: `m2-sdk.dll` (`mercs2_formats::mod_runtime`), the runtime every mod shares: it holds the
+//! process's one MinHook instance and the Lua host. Its version is checked against the one this ASI was built
+//! against before anything is hooked.
 
 use std::ffi::{CStr, c_char, c_void};
 use std::path::{Path, PathBuf};
@@ -41,14 +42,17 @@ use crate::log::Logger;
 use crate::relay::{AliasPlan, GAME_VOICE_PORT, RelayFactory, ShimFactory, ShimSettings};
 use crate::theater::{TheaterAdapter, TheaterSettings};
 use crate::ws::{WsLobbyProvider, WsSettings};
-use crate::pe::PeHeaders;
 use crate::protossl::{REF_SIZE, RefView};
 use crate::session::SessionSlot;
 use crate::signature::{CODE_SECTION, ProtoSslFn, Resolved, resolve};
 use crate::vconn::{ConnectArgs, ConnectEnv, Service, ServiceFactory, Table};
+use mercs2_formats::exe_image::{self, Image};
+use mercs2_formats::mod_runtime as rt;
 use crate::worker::{RestApi, Worker};
 
 const TITLE: &str = "multiplayer_restored";
+/// The m2-sdk.dll release this ASI is built against (manifest.yaml requires `^0.4`).
+const SDK_BUILT: &str = "0.4.0";
 /// How often the start-up thread re-scans `.text` while waiting for SecuROM to decrypt it.
 const SCAN_INTERVAL: Duration = Duration::from_millis(250);
 
@@ -202,26 +206,37 @@ fn readable(ptr: *const u8, len: usize) -> bool {
     true
 }
 
-struct Image {
+struct Game {
+    image: Image<'static>,
     code: &'static [u8],
     resolved: Resolved,
 }
 
-fn wait_for_image(cfg: &Config, log: &Logger) -> Image {
+fn wait_for_image(cfg: &Config, log: &Logger) -> Game {
     let base = unsafe { GetModuleHandleW(std::ptr::null()) } as *const u8;
     if base.is_null() || !readable(base, 0x1000) {
         fatal(Some(log), "cannot read the game module's PE headers");
     }
     let headers = unsafe { std::slice::from_raw_parts(base, 0x1000) };
-    let pe = PeHeaders::parse(headers).unwrap_or_else(|e| fatal(Some(log), &format!("game module headers: {e}")));
-    let sec = pe.section(CODE_SECTION).unwrap_or_else(|e| fatal(Some(log), &format!("game module: {e}"))).clone();
+    let (image_base, sections) =
+        exe_image::parse_headers(headers).unwrap_or_else(|e| fatal(Some(log), &format!("game module headers: {e}")));
+    let sec = sections
+        .iter()
+        .find(|s| s.name == CODE_SECTION)
+        .unwrap_or_else(|| fatal(Some(log), &format!("game module: no {CODE_SECTION} section")))
+        .clone();
     let code_ptr = unsafe { base.add(sec.virtual_address as usize) };
+    let code_va = base as u32 + sec.virtual_address;
     let deadline = Instant::now() + Duration::from_millis(cfg.signature_wait_ms.into());
     loop {
         let last = if readable(code_ptr, sec.common_len()) {
             let code: &'static [u8] = unsafe { std::slice::from_raw_parts(code_ptr, sec.common_len()) };
-            match resolve(code, |o| pe.va_of(&sec, o)) {
-                Ok(resolved) => return Image { code, resolved },
+            match resolve(code, |o| code_va + o as u32) {
+                Ok(resolved) => {
+                    // Every section's common span is part of the mapped image for the life of the process.
+                    let image = unsafe { Image::from_mapped(base, image_base, sections) };
+                    return Game { image, code, resolved };
+                }
                 Err(e) => Some((e, crate::build_id::sha256_hex(code))),
             }
         } else {
@@ -244,7 +259,7 @@ fn wait_for_image(cfg: &Config, log: &Logger) -> Image {
     }
 }
 
-fn install_hooks(img: &Image, log: &Logger) {
+fn install_hooks(img: &Game, log: &Logger) {
     let target = |f: ProtoSslFn| img.resolved.va(f) as usize as *mut c_void;
     // Disconnect and Destroy call the original; the SDK writes their trampolines before enabling each hook.
     let hooks: [(ProtoSslFn, *mut c_void, Option<&AtomicUsize>); 7] = [
@@ -257,7 +272,7 @@ fn install_hooks(img: &Image, log: &Logger) {
         (ProtoSslFn::Stat, hook_stat as *mut c_void, None),
     ];
     for (f, detour, orig) in hooks {
-        crate::m2sdk::ffi::attach(target(f), detour, orig, f.name()).unwrap_or_else(|e| fatal(Some(log), &e));
+        unsafe { rt::hook_attach(target(f), detour, orig, f.name()) }.unwrap_or_else(|e| fatal(Some(log), &e));
     }
 }
 
@@ -306,15 +321,9 @@ fn init(hinst: usize) {
         crate::tls::CA_BUNDLE_MOZILLA_DATE
     ));
 
-    let sdk = unsafe { crate::m2sdk::ffi::m2_version_num() };
-    crate::m2sdk::compatible(sdk, env!("M2_SDK_VERSION")).unwrap_or_else(|e| fatal(Some(&log), &e));
-    log.info(format!(
-        "m2-sdk.dll {}.{}.{} (built against {})",
-        sdk / 10000,
-        sdk / 100 % 100,
-        sdk % 100,
-        env!("M2_SDK_VERSION")
-    ));
+    let sdk = rt::loaded_version();
+    rt::compatible(sdk, SDK_BUILT).unwrap_or_else(|e| fatal(Some(&log), &e));
+    log.info(format!("m2-sdk.dll {}.{}.{} (built against {SDK_BUILT})", sdk / 10000, sdk / 100 % 100, sdk % 100));
 
     let img = wait_for_image(&cfg, &log);
     let build = crate::build_id::sha256_hex(img.code);
@@ -322,7 +331,7 @@ fn init(hinst: usize) {
         log.info(format!("signature {} -> {:#x}", f.name(), img.resolved.va(f)));
     }
     log.info(format!("build .text sha256 {build}"));
-    crate::lua::win::install(img.code, &log, fatal);
+    crate::lua::win::install(&img.image, &log, fatal);
 
     let connector = crate::tls::mozilla_connector().unwrap_or_else(|e| fatal(Some(&log), &format!("TLS setup: {e}")));
     log.info("TLS connector ready (CA bundle loaded)");
