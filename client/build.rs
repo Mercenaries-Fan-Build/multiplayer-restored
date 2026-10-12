@@ -2,8 +2,8 @@
 //! `rust-mingw` component ships for this target (the prebuilt i686 std references `_Unwind_Resume`; a
 //! SJLJ MinGW such as Homebrew's provides only `_Unwind_SjLj_Resume`). `scripts/fetch_dw2_libgcc.sh`
 //! downloads and sha256-verifies them into `toolchain/i686-dw2/` for the exact rustc in use; this script
-//! refuses to build if they are missing or were fetched for another rustc. Likewise the `m2-sdk.dll` import
-//! library (`scripts/fetch_m2_sdk.sh`, into `toolchain/m2-sdk/`) for the SDK release `m2-sdk.version` names.
+//! refuses to build if they are missing or were fetched for another rustc. m2-sdk.dll needs no import
+//! library: `mercs2_formats::mod_runtime` declares its imports `raw-dylib`.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -38,21 +38,4 @@ fn main() {
         assert!(dir.join(lib).is_file(), "{} missing; re-run scripts/fetch_dw2_libgcc.sh", dir.join(lib).display());
     }
     println!("cargo:rustc-link-search=native={}", dir.display());
-
-    // m2-sdk.dll's import library, fetched by scripts/fetch_m2_sdk.sh for the release m2-sdk.version names.
-    // The version is also handed to the code, whose load-time ABI check compares the loaded DLL against it.
-    let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR"));
-    println!("cargo:rerun-if-changed=m2-sdk.version");
-    println!("cargo:rerun-if-changed=toolchain/m2-sdk");
-    let wanted = std::fs::read_to_string(manifest_dir.join("m2-sdk.version")).expect("read m2-sdk.version");
-    let wanted = wanted.trim();
-    let sdk = manifest_dir.join("toolchain/m2-sdk");
-    let fetched = std::fs::read_to_string(sdk.join("VERSION"))
-        .unwrap_or_else(|e| panic!("{}: {e}\nRun scripts/fetch_m2_sdk.sh to fetch the m2-sdk {wanted} import library", sdk.join("VERSION").display()));
-    if fetched.trim() != wanted {
-        panic!("toolchain/m2-sdk holds m2-sdk {:?} but m2-sdk.version names {wanted:?}; re-run scripts/fetch_m2_sdk.sh", fetched.trim());
-    }
-    assert!(sdk.join("libm2-sdk.dll.a").is_file(), "{} missing; re-run scripts/fetch_m2_sdk.sh", sdk.join("libm2-sdk.dll.a").display());
-    println!("cargo:rustc-link-search=native={}", sdk.display());
-    println!("cargo:rustc-env=M2_SDK_VERSION={}", wanted.trim_start_matches('v'));
 }
