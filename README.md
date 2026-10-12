@@ -49,8 +49,8 @@ cargo test
 ```
 
 Needs `i686-w64-mingw32-gcc` on `PATH`. The m2-sdk.dll bindings, PE reader and signature scanner come from
-`mercs2_formats` in the research repository's `tools/wad_simulator`, and some tests read the reference
-executables from it, so the client builds and tests inside that checkout.
+the published `mercs2_formats` crate. Some tests read the reference executables from the research
+repository's `output/_ghidra/securom_dump/`, so the tests run inside that checkout.
 
 ## Testing in game
 
