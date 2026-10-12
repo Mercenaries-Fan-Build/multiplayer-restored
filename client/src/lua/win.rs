@@ -1,54 +1,36 @@
-//! Windows-only: the namespace-walker detour, `Mp` registration, and the `lua_CFunction` entry points.
+//! Windows-only: the `Mp` namespace's `lua_CFunction` entry points and its registration through
+//! m2-sdk.dll.
 //!
-//! [`install`] runs on the ASI's start-up thread after the ProtoSSL detours are in place. It resolves
-//! the six sites ([`super::signature::resolve`]), detours the walker, and then checks that the script
-//! host has not already created its `lua_State` without us: if the host's `initialised` byte is set and
-//! the detour has not registered `Mp` within [`LATE_INIT_GRACE`] (the case of an init already past the
-//! walker), the state that exists will never have `Mp`, and start-up fails. Every failure is fatal
-//! through the caller's `fatal` (log, message box, exit).
+//! [`install`] runs on the ASI's start-up thread. It finds the game's account buffers
+//! ([`super::signature::resolve`]), installs the SDK's Lua host (`m2_lua_install`, idempotent: whichever mod
+//! calls it first installs it), and adds `Mp` with `m2_lua_add_namespace`: the SDK registers it on every
+//! state the script host creates, before any script of that state runs, and on any state it captures that
+//! already existed. Every failure is fatal through the caller's `fatal` (log, message box, exit).
 //!
-//! Calling conventions (from the disassembly, see [`super::signature`]): the walker is
-//! `__stdcall (host)`; `luaL_register` takes `ECX = L`, `EAX = libname` and the `luaL_Reg*` pushed,
-//! caller pops; `luaS_newlstr` is cdecl `(L, str, len)`; `luaG_errormsg` takes `EAX = L` and does not
-//! return (`longjmp` to the enclosing `lua_pcall`).
-//!
-//! Raising a Lua error `longjmp`s over the Rust frames of the binding. MSVC's `longjmp` unwinds only
-//! the SEH frames registered on the way, and Rust frames register none, so the jump restores the
-//! registers and leaves them; the bindings therefore drop every owned value before they raise
-//! ([`raise`] takes nothing that needs dropping).
+//! Raising a Lua error `longjmp`s over the Rust frames of the binding (`m2_lua_raise`); the bindings drop
+//! every owned value before they raise ([`game::call`] leaks only the message).
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::OnceLock;
-use std::time::{Duration, Instant};
 
+use mercs2_formats::exe_image::Image;
 use windows_sys::Win32::System::Memory::{MEM_COMMIT, MEMORY_BASIC_INFORMATION, PAGE_GUARD, PAGE_NOACCESS, VirtualQuery};
+use mercs2_formats::mod_runtime::lua::game;
+use mercs2_formats::mod_runtime::{self as rt, LuaReg};
 
-use super::bindings::{self, NAMESPACE, Ret};
-use super::signature::{HOST_INITIALISED, HOST_LUA_STATE, LuaFn, LuaSites, resolve};
-use super::state::{L_TOP, LUA_TTABLE, Stack, TVALUE_SIZE, TVALUE_TT, Vm};
+use super::bindings::{self, NAMESPACE};
+use super::signature::{AccountSites, resolve};
 use crate::log::Logger;
 
 /// The caller's fatal-error path: log (to the logger given), show, exit.
 pub type Fatal = fn(Option<&Logger>, &str) -> !;
 
-/// How long an init that is already running when the detour goes in may take to reach the walker.
-const LATE_INIT_GRACE: Duration = Duration::from_secs(2);
-
 struct Ctx {
-    sites: LuaSites,
+    account: AccountSites,
     log: Logger,
-    fatal: Fatal,
 }
 
 static CTX: OnceLock<Ctx> = OnceLock::new();
-static ORIG_WALKER: AtomicUsize = AtomicUsize::new(0);
-/// How many `lua_State`s `Mp` has been registered on.
-static REGISTERED: AtomicU32 = AtomicU32::new(0);
-
-fn ctx() -> &'static Ctx {
-    CTX.get().expect("the Lua detour runs only after install() stored its context")
-}
 
 /// True when `[addr, addr+len)` is committed and readable.
 fn readable(addr: u32, len: u32) -> bool {
@@ -65,103 +47,30 @@ fn readable(addr: u32, len: u32) -> bool {
     true
 }
 
-/// The game process as a [`Vm`]: addresses are this process's (i686: 32-bit).
-struct Process {
-    newlstr: u32,
+fn ctx() -> &'static Ctx {
+    CTX.get().expect("the Mp bindings run only after install() stored their context")
 }
 
-impl Vm for Process {
-    fn read_u32(&self, addr: u32) -> u32 {
-        unsafe { std::ptr::read_unaligned(addr as usize as *const u32) }
-    }
-    fn write_u32(&mut self, addr: u32, value: u32) {
-        unsafe { std::ptr::write_unaligned(addr as usize as *mut u32, value) }
-    }
-    fn read_bytes(&self, addr: u32, len: u32) -> Vec<u8> {
-        unsafe { std::slice::from_raw_parts(addr as usize as *const u8, len as usize) }.to_vec()
-    }
-    fn new_string(&mut self, l: u32, bytes: &[u8]) -> u32 {
-        let f: unsafe extern "C" fn(u32, *const u8, u32) -> u32 = unsafe { std::mem::transmute(self.newlstr as usize) };
-        unsafe { f(l, bytes.as_ptr(), bytes.len() as u32) }
-    }
-}
-
-/// `luaL_Reg`: `{ const char *name; lua_CFunction func; }`, NULL-terminated.
-#[repr(C)]
-struct Reg {
-    name: *const std::ffi::c_char,
-    func: Option<unsafe extern "C" fn(u32) -> i32>,
-}
-
-struct RegTable([Reg; 4]);
-// SAFETY: the table is immutable and its pointers are to 'static data and functions.
-unsafe impl Sync for RegTable {}
-
-static MP_LIB: RegTable = RegTable([
-    Reg { name: c"GetRoomKey".as_ptr(), func: Some(mp_get_room_key) },
-    Reg { name: c"SetRoomKey".as_ptr(), func: Some(mp_set_room_key) },
-    Reg { name: c"Logout".as_ptr(), func: Some(mp_logout) },
-    Reg { name: std::ptr::null(), func: None },
-]);
-
-static MP_NAME: &std::ffi::CStr = c"Mp";
-
-/// Push the message, then `luaG_errormsg(L)`; never returns.
-///
-/// # Safety
-/// `l` is the running `lua_State` of a binding call, and the caller holds no value that needs dropping.
-unsafe fn raise(l: u32, message: String) -> ! {
+unsafe extern "C" fn mp_get_room_key(l: *mut c_void) -> i32 {
     let c = ctx();
-    {
-        let mut vm = Process { newlstr: c.sites.va(LuaFn::LuaSNewLStr) };
-        Stack::new(&mut vm, l).push_string(message.as_bytes());
-    }
-    drop(message);
-    let errormsg = c.sites.va(LuaFn::LuaGErrorMsg);
-    unsafe {
-        std::arch::asm!(
-            "call {f}",
-            f = in(reg) errormsg,
-            in("eax") l,
-            options(noreturn)
-        )
-    }
+    unsafe { game::call(l, |g| bindings::get_room_key(g, crate::room_key::global(), &c.log)) }
 }
 
-fn dispatch(
-    l: u32,
-    f: fn(&mut Stack<'_, Process>, Result<&crate::room_key::RoomKeyStore, String>, &Logger) -> Ret,
-) -> i32 {
+unsafe extern "C" fn mp_set_room_key(l: *mut c_void) -> i32 {
     let c = ctx();
-    let ret = {
-        let mut vm = Process { newlstr: c.sites.va(LuaFn::LuaSNewLStr) };
-        let mut stack = Stack::new(&mut vm, l);
-        f(&mut stack, crate::room_key::global(), &c.log)
-    };
-    match ret {
-        Ret::Values(n) => n,
-        Ret::Raise(message) => unsafe { raise(l, message) },
-    }
-}
-
-unsafe extern "C" fn mp_get_room_key(l: u32) -> i32 {
-    dispatch(l, bindings::get_room_key)
-}
-
-unsafe extern "C" fn mp_set_room_key(l: u32) -> i32 {
-    dispatch(l, bindings::set_room_key)
+    unsafe { game::call(l, |g| bindings::set_room_key(g, crate::room_key::global(), &c.log)) }
 }
 
 /// `Mp.Logout` in the game: forget the stored name and end the session ([`crate::account::Logout`]) first, so
 /// a name that cannot be removed leaves everything as it was; then empty the game's in-memory account name and
-/// password the way its login-failure handler does (`mov byte [buffer], 0`, [`LuaFn::AccountClear`]).
+/// password the way its login-failure handler does (`mov byte [buffer], 0`, [`super::signature::ACCOUNT_CLEAR`]).
 struct GameLogout<'a>(&'a Ctx);
 
 impl bindings::LogoutAction for GameLogout<'_> {
     fn logout(&self) -> Result<Option<String>, String> {
         let c = self.0;
         let was = crate::account::global()?.run(&c.log)?;
-        for addr in [c.sites.account_name(), c.sites.account_password()] {
+        for addr in [c.account.name, c.account.password] {
             if !readable(addr, 1) {
                 return Err(format!("the game's account buffer at {addr:#x} is not mapped"));
             }
@@ -169,113 +78,42 @@ impl bindings::LogoutAction for GameLogout<'_> {
         }
         c.log.info(format!(
             "logout: emptied the game's account name ({:#x}) and password ({:#x})",
-            c.sites.account_name(),
-            c.sites.account_password()
+            c.account.name, c.account.password
         ));
         Ok(was)
     }
 }
 
-unsafe extern "C" fn mp_logout(l: u32) -> i32 {
+unsafe extern "C" fn mp_logout(l: *mut c_void) -> i32 {
     let c = ctx();
-    let ret = {
-        let mut vm = Process { newlstr: c.sites.va(LuaFn::LuaSNewLStr) };
-        let mut stack = Stack::new(&mut vm, l);
-        bindings::logout(&mut stack, Ok(&GameLogout(c)), &c.log)
-    };
-    match ret {
-        Ret::Values(n) => n,
-        Ret::Raise(message) => unsafe { raise(l, message) },
-    }
+    unsafe { game::call(l, |g| bindings::logout(g, Ok(&GameLogout(c)), &c.log)) }
 }
 
-/// Register `Mp` on `l` with the game's `luaL_register`, then pop the table it leaves on the stack.
-fn register(c: &Ctx, l: u32) {
-    let mut vm = Process { newlstr: c.sites.va(LuaFn::LuaSNewLStr) };
-    let top_before = vm.read_u32(l + L_TOP);
-    let func = c.sites.va(LuaFn::LuaLRegister);
-    let table = MP_LIB.0.as_ptr() as u32;
-    let name = MP_NAME.as_ptr() as u32;
-    unsafe {
-        std::arch::asm!(
-            "push {table}",
-            "call {func}",
-            "add esp, 4",
-            table = in(reg) table,
-            func = in(reg) func,
-            inout("ecx") l => _,
-            inout("eax") name => _,
-            out("edx") _,
-            clobber_abi("C"),
-        )
-    }
-    let top = vm.read_u32(l + L_TOP);
-    let tag = if top == top_before + TVALUE_SIZE { vm.read_u32(top_before + TVALUE_TT) } else { u32::MAX };
-    if tag != LUA_TTABLE {
-        (c.fatal)(Some(&c.log), &format!(
-            "luaL_register({NAMESPACE}) on lua_State {l:#x} left the stack top at {top:#x} (was {top_before:#x}) \
-             with tag {tag:#x}; expected exactly one table"
-        ));
-    }
-    vm.write_u32(l + L_TOP, top_before);
-    let n = REGISTERED.fetch_add(1, Ordering::AcqRel) + 1;
-    c.log.info(format!(
-        "registered Lua namespace {NAMESPACE} (GetRoomKey, SetRoomKey, Logout) on lua_State {l:#x} (script-host state #{n})"
-    ));
+const fn reg(name: &'static std::ffi::CStr, f: rt::LuaCFunction) -> LuaReg {
+    LuaReg { name: name.as_ptr(), func: Some(f) }
 }
 
-unsafe extern "stdcall" fn hook_register_namespaces(host: u32) {
-    let orig: unsafe extern "stdcall" fn(u32) = unsafe { std::mem::transmute(ORIG_WALKER.load(Ordering::Acquire)) };
-    unsafe { orig(host) };
-    let c = ctx();
-    let l = Process { newlstr: 0 }.read_u32(host + HOST_LUA_STATE);
-    if l == 0 {
-        (c.fatal)(Some(&c.log), &format!("the script host {host:#x} has no lua_State at +{HOST_LUA_STATE:#x} after its namespaces were registered"));
-    }
-    register(c, l);
-}
+static MP_LIB: [LuaReg; 4] = [
+    reg(c"GetRoomKey", mp_get_room_key),
+    reg(c"SetRoomKey", mp_set_room_key),
+    reg(c"Logout", mp_logout),
+    LuaReg { name: std::ptr::null(), func: None },
+];
 
-/// Resolve the sites in `code` (the mapped `.text`), detour the walker, and verify the host had no
-/// `lua_State` we missed.
-pub fn install(code: &'static [u8], log: &Logger, fatal_path: Fatal) {
-    let fatal = |m: &str| -> ! { fatal_path(Some(log), m) };
-    let text_va = code.as_ptr() as u32;
-    let read = |va: u32| readable(va, 4).then(|| Process { newlstr: 0 }.read_u32(va));
-    let sites = resolve(code, |o| text_va + o as u32, read).unwrap_or_else(|e| fatal(&format!("unsupported game build: {e}")));
-    for f in LuaFn::ALL {
-        log.info(format!("lua signature {} -> {:#x}", f.name(), sites.va(f)));
-    }
-    log.info(format!("lua script host at {:#x}", sites.host()));
-    if CTX.set(Ctx { sites, log: log.clone(), fatal: fatal_path }).is_err() {
-        fatal("Lua bindings installed twice");
-    }
-    let walker = sites.va(LuaFn::RegisterNamespaces) as usize as *mut c_void;
-    crate::m2sdk::ffi::attach(walker, hook_register_namespaces as *mut c_void, Some(&ORIG_WALKER), "ScriptHostRegisterNamespaces")
-        .unwrap_or_else(|e| fatal(&e));
-    log.info(format!("Lua detour installed: ScriptHostRegisterNamespaces at {walker:p}"));
-
-    let flag = sites.host() + HOST_INITIALISED;
-    if !readable(flag, 1) {
-        fatal(&format!("the script host's initialised byte at {flag:#x} is not readable"));
-    }
-    let initialised = unsafe { std::ptr::read_volatile(flag as usize as *const u8) } != 0;
-    if initialised {
-        let deadline = Instant::now() + LATE_INIT_GRACE;
-        while REGISTERED.load(Ordering::Acquire) == 0 {
-            if Instant::now() >= deadline {
-                fatal(&format!(
-                    "the game created its Lua state before the multiplayer ASI hooked it (script host {:#x} was \
-                     already initialised), so the Lua namespace {NAMESPACE} would be missing. The ASI's start-up \
-                     reached the hook too late; the timestamps in multiplayer_restored.log show which step took \
-                     the time — please report it with that log.",
-                    sites.host()
-                ));
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    }
+/// Find the account buffers in `img` (the mapped game image), then add `Mp` to every Lua state.
+pub fn install(img: &Image, log: &Logger, fatal: Fatal) {
+    let account = resolve(img).unwrap_or_else(|e| fatal(Some(log), &format!("unsupported game build: {e}")));
     log.info(format!(
-        "script host {} a Lua state at hook time; {NAMESPACE} is registered on every state it creates",
-        if initialised { "already had" } else { "had not yet created" }
+        "signature {} -> {:#x} (account name {:#x}, password {:#x})",
+        super::signature::ACCOUNT_CLEAR_NAME,
+        account.clear,
+        account.name,
+        account.password
     ));
+    if CTX.set(Ctx { account, log: log.clone() }).is_err() {
+        fatal(Some(log), "the Mp bindings were installed twice");
+    }
+    rt::lua_install().unwrap_or_else(|e| fatal(Some(log), &format!("m2-sdk.dll's Lua host: {e}")));
+    rt::lua_add_namespace(c"Mp", &MP_LIB).unwrap_or_else(|e| fatal(Some(log), &format!("adding {NAMESPACE}: {e}")));
+    log.info(format!("Lua namespace {NAMESPACE} (GetRoomKey, SetRoomKey, Logout) added through m2-sdk.dll"));
 }
