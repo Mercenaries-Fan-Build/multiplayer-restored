@@ -8,6 +8,7 @@
 //! change if the function body itself changes. Function roles and argument lists:
 //! `docs/reverse_engineer/multiplayer_rewrite_re.md` §4.
 
+use mercs2_formats::lua_sites::Pattern;
 use thiserror::Error;
 
 /// The ProtoSSL entries, in table order.
@@ -101,77 +102,6 @@ impl ProtoSslFn {
 /// The section every ProtoSSL signature is searched in.
 pub const CODE_SECTION: &str = ".text";
 
-#[derive(Debug, Error, PartialEq, Eq)]
-pub enum PatternError {
-    #[error("pattern token {0:?} is neither two hex digits nor ??")]
-    BadToken(String),
-    #[error("empty pattern")]
-    Empty,
-    #[error("pattern starts with a wildcard (a scan needs a fixed first byte)")]
-    LeadingWildcard,
-}
-
-/// A parsed byte pattern; `None` is a wildcard.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Pattern(Vec<Option<u8>>);
-
-impl Pattern {
-    pub fn parse(text: &str) -> Result<Self, PatternError> {
-        let mut out = Vec::new();
-        for tok in text.split_ascii_whitespace() {
-            if tok == "??" {
-                out.push(None);
-            } else if tok.len() == 2 {
-                out.push(Some(u8::from_str_radix(tok, 16).map_err(|_| PatternError::BadToken(tok.to_owned()))?));
-            } else {
-                return Err(PatternError::BadToken(tok.to_owned()));
-            }
-        }
-        match out.first() {
-            None => Err(PatternError::Empty),
-            Some(None) => Err(PatternError::LeadingWildcard),
-            Some(Some(_)) => Ok(Pattern(out)),
-        }
-    }
-
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    pub fn matches_at(&self, hay: &[u8], at: usize) -> bool {
-        hay.get(at..at + self.0.len())
-            .is_some_and(|w| w.iter().zip(&self.0).all(|(b, p)| p.is_none_or(|p| p == *b)))
-    }
-
-    /// Every offset in `hay` where the pattern matches.
-    pub fn find_all(&self, hay: &[u8]) -> Vec<usize> {
-        let first = self.0[0].expect("parse() rejects a leading wildcard");
-        let mut hits = Vec::new();
-        if hay.len() < self.0.len() {
-            return hits;
-        }
-        let last_start = hay.len() - self.0.len();
-        let mut i = 0;
-        while i <= last_start {
-            match hay[i..=last_start].iter().position(|&b| b == first) {
-                None => break,
-                Some(p) => {
-                    let at = i + p;
-                    if self.matches_at(hay, at) {
-                        hits.push(at);
-                    }
-                    i = at + 1;
-                }
-            }
-        }
-        hits
-    }
-}
-
 /// Where each ProtoSSL function was found.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Resolved {
@@ -228,8 +158,20 @@ pub fn resolve(code: &[u8], va_of: impl Fn(usize) -> u32) -> Result<Resolved, Re
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pe::PeHeaders;
     use crate::testdata;
+    use mercs2_formats::exe_image::Image;
+
+    /// The `.text` bytes of an exe file and the VA of each offset in it.
+    fn code(bytes: &[u8]) -> (Vec<u8>, u32) {
+        let img = Image::from_file(bytes).unwrap();
+        let s = img.section(CODE_SECTION).unwrap();
+        (s.bytes.to_vec(), s.va)
+    }
+
+    /// The fixed bytes a pattern starts with, up to its first wildcard.
+    fn prefix(p: &str) -> Vec<u8> {
+        p.split_whitespace().map_while(|t| u8::from_str_radix(t, 16).ok()).collect()
+    }
 
     /// Expected VAs (multiplayer_rewrite_re.md §4) — test oracle only, never used at runtime.
     fn expected(f: ProtoSslFn) -> u32 {
@@ -249,16 +191,15 @@ mod tests {
     fn every_signature_matches_exactly_once_at_the_expected_va_in_both_exes() {
         for exe in testdata::EXES {
             let bytes = testdata::read_exe(exe);
-            let h = PeHeaders::parse(&bytes).unwrap();
-            let (sec, code) = h.file_section(&bytes, CODE_SECTION).unwrap();
+            let (code, va) = code(&bytes);
             for f in ProtoSslFn::ALL {
-                let hits = Pattern::parse(f.pattern()).unwrap().find_all(code);
-                let vas: Vec<String> = hits.iter().map(|&o| format!("{:#x}", h.va_of(sec, o))).collect();
+                let hits = Pattern::parse(f.pattern()).unwrap().find_all(&code);
+                let vas: Vec<String> = hits.iter().map(|&o| format!("{:#x}", va + o as u32)).collect();
                 println!("{exe} {:<20} matches={} at {:?}", f.name(), hits.len(), vas);
                 assert_eq!(hits.len(), 1, "{exe} {}: {vas:?}", f.name());
-                assert_eq!(h.va_of(sec, hits[0]), expected(f), "{exe} {}", f.name());
+                assert_eq!(va + hits[0] as u32, expected(f), "{exe} {}", f.name());
             }
-            let r = resolve(code, |o| h.va_of(sec, o)).unwrap();
+            let r = resolve(&code, |o| va + o as u32).unwrap();
             for f in ProtoSslFn::ALL {
                 assert_eq!(r.va(f), expected(f));
             }
@@ -271,9 +212,8 @@ mod tests {
         // ProtoSSL block is the same code 0xF0 bytes higher (objdump: Create at 0x9d9a00, Connect at
         // 0x9d9af0), which the wildcarded table must find without a per-build address list.
         let bytes = testdata::read_exe(testdata::V11_DUMP);
-        let h = PeHeaders::parse(&bytes).unwrap();
-        let (sec, code) = h.file_section(&bytes, CODE_SECTION).unwrap();
-        let r = resolve(code, |o| h.va_of(sec, o)).unwrap();
+        let (code, va) = code(&bytes);
+        let r = resolve(&code, |o| va + o as u32).unwrap();
         for f in ProtoSslFn::ALL {
             println!("{} {:<20} at {:#x}", testdata::V11_DUMP, f.name(), r.va(f));
             assert_eq!(r.va(f), expected(f) + 0xf0, "{}", f.name());
@@ -286,11 +226,9 @@ mod tests {
         // function at one of its expected VAs: the bytes must be the leading fixed bytes of THAT
         // function's pattern and appear at that VA in every reference image where the function sits
         // there (.text file offset == VA - 0x400000 in all three). Detoured: every ProtoSSL entry but
-        // Create (resolved, not detoured), and `crate::lua::signature::LuaFn::HOOKED`.
-        use crate::lua::signature::{LuaFn, tests::expected as lua_expected};
+        // Create (resolved, not detoured).
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../manifest.yaml");
         let text = std::fs::read_to_string(&path).unwrap();
-        let prefix = |p: &str| -> Vec<u8> { Pattern::parse(p).unwrap().0.into_iter().map_while(|b| b).collect() };
         let names: Vec<&str> = testdata::EXES.iter().copied().chain([testdata::V11_DUMP]).collect();
         let images: Vec<_> = names.iter().map(|n| testdata::read_exe(n)).collect();
         // (function, VA, guard prefix, indices of the images where the function sits at VA)
@@ -305,9 +243,6 @@ mod tests {
             for f in ProtoSslFn::ALL.into_iter().filter(|&f| f != ProtoSslFn::Create) {
                 let va = if *image == testdata::V11_DUMP { expected(f) + 0xf0 } else { expected(f) };
                 add(f.name(), f.pattern(), i, va);
-            }
-            for f in LuaFn::HOOKED {
-                add(f.name(), f.pattern(), i, lua_expected(image, f));
             }
         }
         let mut guards = 0;
@@ -350,18 +285,13 @@ mod tests {
 
         // Two copies of the Disconnect body → ambiguous.
         let disc = Pattern::parse(ProtoSslFn::Disconnect.pattern()).unwrap();
-        let body: Vec<u8> = disc.0.iter().map(|b| b.unwrap_or(0x11)).collect();
+        let body: Vec<u8> = ProtoSslFn::Disconnect
+            .pattern()
+            .split_whitespace()
+            .map(|t| u8::from_str_radix(t, 16).unwrap_or(0x11))
+            .collect();
         let mut hay = body.clone();
         hay.extend_from_slice(&body);
         assert_eq!(disc.find_all(&hay), vec![0, body.len()]);
-    }
-
-    #[test]
-    fn pattern_parser_is_strict() {
-        assert_eq!(Pattern::parse(""), Err(PatternError::Empty));
-        assert_eq!(Pattern::parse("?? 90"), Err(PatternError::LeadingWildcard));
-        assert_eq!(Pattern::parse("9g"), Err(PatternError::BadToken("9g".into())));
-        assert_eq!(Pattern::parse("909"), Err(PatternError::BadToken("909".into())));
-        assert!(Pattern::parse("90 ?? c3").unwrap().matches_at(&[0x90, 0x12, 0xc3], 0));
     }
 }
