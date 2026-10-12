@@ -16,28 +16,22 @@
 
 use mercs2_mp_api::ErrorCode;
 
-use super::state::{Arg, Stack, Vm, type_name};
+use mercs2_formats::mod_runtime::lua::{Lua, TNIL, TSTRING, type_name};
+
+pub use mercs2_formats::mod_runtime::lua::Ret;
+
 use crate::log::Logger;
 use crate::room_key::RoomKeyStore;
 
 /// The global table the functions are registered under.
 pub const NAMESPACE: &str = "Mp";
 
-/// What a binding wants returned to Lua.
-#[derive(Debug, PartialEq, Eq)]
-pub enum Ret {
-    /// This many values were pushed.
-    Values(i32),
-    /// Raise a Lua error with this message (nothing was pushed).
-    Raise(String),
-}
-
-fn too_many(name: &str, max: u32, got: u32) -> Ret {
+fn too_many(name: &str, max: i32, got: i32) -> Ret {
     Ret::Raise(format!("{NAMESPACE}.{name} takes at most {max} argument(s), got {got}"))
 }
 
 /// `Mp.GetRoomKey()`.
-pub fn get_room_key<V: Vm>(s: &mut Stack<'_, V>, store: Result<&RoomKeyStore, String>, log: &Logger) -> Ret {
+pub fn get_room_key<L: Lua>(s: &mut L, store: Result<&RoomKeyStore, String>, log: &Logger) -> Ret {
     let n = s.arg_count();
     if n > 0 {
         let r = too_many("GetRoomKey", 0, n);
@@ -61,16 +55,17 @@ pub fn get_room_key<V: Vm>(s: &mut Stack<'_, V>, store: Result<&RoomKeyStore, St
 }
 
 /// `Mp.SetRoomKey(key | nil)`.
-pub fn set_room_key<V: Vm>(s: &mut Stack<'_, V>, store: Result<&RoomKeyStore, String>, log: &Logger) -> Ret {
+pub fn set_room_key<L: Lua>(s: &mut L, store: Result<&RoomKeyStore, String>, log: &Logger) -> Ret {
     let n = s.arg_count();
     if n > 1 {
         let r = too_many("SetRoomKey", 1, n);
         log_raise(log, "SetRoomKey", &r);
         return r;
     }
-    let key = match s.arg(1) {
-        Arg::Nil => None,
-        Arg::Str(bytes) => match String::from_utf8(bytes) {
+    let tag = s.arg_type(0);
+    let key = match tag {
+        -1 | TNIL => None,
+        TSTRING => match String::from_utf8(s.arg_string(0).expect("a string argument reads")) {
             Ok(k) => Some(k),
             Err(e) => {
                 // Not UTF-8 is not ASCII either, so it can never be a key: refuse it like any other.
@@ -81,7 +76,7 @@ pub fn set_room_key<V: Vm>(s: &mut Stack<'_, V>, store: Result<&RoomKeyStore, St
                 return Ret::Values(2);
             }
         },
-        Arg::Other(tag) => {
+        _ => {
             let r = Ret::Raise(format!(
                 "{NAMESPACE}.SetRoomKey expects a string or nil, got {}",
                 type_name(tag)
@@ -125,7 +120,7 @@ pub trait LogoutAction {
 }
 
 /// `Mp.Logout()`.
-pub fn logout<V: Vm>(s: &mut Stack<'_, V>, action: Result<&dyn LogoutAction, String>, log: &Logger) -> Ret {
+pub fn logout<L: Lua>(s: &mut L, action: Result<&dyn LogoutAction, String>, log: &Logger) -> Ret {
     let n = s.arg_count();
     if n > 0 {
         let r = too_many("Logout", 0, n);
@@ -167,28 +162,27 @@ fn log_raise(log: &Logger, name: &str, r: &Ret) {
 
 #[cfg(test)]
 mod tests {
-    use super::super::state::arena::*;
-    use super::super::state::{LUA_TBOOLEAN, LUA_TNIL, LUA_TSTRING};
     use super::*;
     use crate::log::capture::logger;
+    use mercs2_formats::mod_runtime::lua::fake::{FakeLua, Val, s};
 
     fn store(k: Option<&str>) -> RoomKeyStore {
         RoomKeyStore::new(k.map(str::to_owned))
+    }
+
+    fn call(args: Vec<Val>, f: impl FnOnce(&mut FakeLua) -> Ret) -> (Ret, Vec<Val>) {
+        let mut l = FakeLua::with(args);
+        let r = f(&mut l);
+        (r, l.pushed)
     }
 
     #[test]
     fn get_returns_the_key_or_nil() {
         let (log, cap) = logger();
         let st = store(Some("venezuela-42"));
-        let mut a = Arena::with_args(&[]);
-        assert_eq!(get_room_key(&mut Stack::new(&mut a, L), Ok(&st), &log), Ret::Values(1));
-        assert_eq!(a.results(0)[0].1.as_deref(), Some("venezuela-42"));
-        assert_eq!(a.results(0)[0].0, LUA_TSTRING);
-
+        assert_eq!(call(vec![], |l| get_room_key(l, Ok(&st), &log)), (Ret::Values(1), vec![s("venezuela-42")]));
         st.set(None).unwrap();
-        let mut a = Arena::with_args(&[]);
-        assert_eq!(get_room_key(&mut Stack::new(&mut a, L), Ok(&st), &log), Ret::Values(1));
-        assert_eq!(a.results(0)[0].0, LUA_TNIL);
+        assert_eq!(call(vec![], |l| get_room_key(l, Ok(&st), &log)), (Ret::Values(1), vec![Val::Nil]));
         let t = cap.text();
         assert!(t.contains("Mp.GetRoomKey() -> \"venezuela-42\"") && t.contains("Mp.GetRoomKey() -> nil"), "{t}");
     }
@@ -197,33 +191,37 @@ mod tests {
     fn set_validates_with_the_store() {
         let (log, cap) = logger();
         let st = store(None);
-
-        let mut a = Arena::with_args(&[ArenaArg::Str("1234567")]);
-        assert_eq!(set_room_key(&mut Stack::new(&mut a, L), Ok(&st), &log), Ret::Values(1));
-        assert_eq!((a.results(1)[0].0, a.results(1)[0].2), (LUA_TBOOLEAN, 1));
+        assert_eq!(call(vec![s("1234567")], |l| set_room_key(l, Ok(&st), &log)), (Ret::Values(1), vec![Val::Bool(true)]));
         assert_eq!(st.get().unwrap().as_deref(), Some("1234567"));
 
         // Invalid: false + the rule's message, old key kept.
-        let mut a = Arena::with_args(&[ArenaArg::Str("bad key")]);
-        assert_eq!(set_room_key(&mut Stack::new(&mut a, L), Ok(&st), &log), Ret::Values(2));
-        let r = a.results(1);
-        assert_eq!((r[0].0, r[0].2), (LUA_TBOOLEAN, 0));
-        assert!(r[1].1.as_deref().unwrap().contains("room_key"), "{r:?}");
+        let (r, pushed) = call(vec![s("bad key")], |l| set_room_key(l, Ok(&st), &log));
+        assert_eq!(r, Ret::Values(2));
+        assert_eq!(pushed[0], Val::Bool(false));
+        assert!(matches!(&pushed[1], Val::Str(m) if String::from_utf8_lossy(m).contains("room_key")), "{pushed:?}");
         assert_eq!(st.get().unwrap().as_deref(), Some("1234567"));
 
         // nil and no argument both clear.
-        let mut a = Arena::with_args(&[ArenaArg::Nil]);
-        assert_eq!(set_room_key(&mut Stack::new(&mut a, L), Ok(&st), &log), Ret::Values(1));
+        assert_eq!(call(vec![Val::Nil], |l| set_room_key(l, Ok(&st), &log)).0, Ret::Values(1));
         assert_eq!(st.get().unwrap(), None);
         st.set(Some("abcdef".into())).unwrap();
-        let mut a = Arena::with_args(&[]);
-        assert_eq!(set_room_key(&mut Stack::new(&mut a, L), Ok(&st), &log), Ret::Values(1));
+        assert_eq!(call(vec![], |l| set_room_key(l, Ok(&st), &log)).0, Ret::Values(1));
         assert_eq!(st.get().unwrap(), None);
 
         let t = cap.text();
         assert!(t.contains("Mp.SetRoomKey(\"1234567\") -> true"), "{t}");
         assert!(t.contains("WARN  Lua Mp.SetRoomKey(\"bad key\") -> false"), "{t}");
         assert!(t.contains("Mp.SetRoomKey(nil) -> true"), "{t}");
+    }
+
+    #[test]
+    fn a_key_that_is_not_text_is_refused_not_raised() {
+        let (log, _) = logger();
+        let st = store(Some("abcdef"));
+        let (r, pushed) = call(vec![Val::Str(vec![0xff, 0xfe])], |l| set_room_key(l, Ok(&st), &log));
+        assert_eq!(r, Ret::Values(2));
+        assert_eq!(pushed[0], Val::Bool(false));
+        assert_eq!(st.get().unwrap().as_deref(), Some("abcdef"));
     }
 
     struct Action(Result<Option<String>, String>);
@@ -236,49 +234,39 @@ mod tests {
     #[test]
     fn logout_returns_true_and_raises_on_failure() {
         let (log, cap) = logger();
-        let mut a = Arena::with_args(&[]);
         let ok = Action(Ok(Some("Addicted_24_7".into())));
-        assert_eq!(logout(&mut Stack::new(&mut a, L), Ok(&ok), &log), Ret::Values(1));
-        assert_eq!((a.results(0)[0].0, a.results(0)[0].2), (LUA_TBOOLEAN, 1));
-        let mut a = Arena::with_args(&[]);
-        assert_eq!(logout(&mut Stack::new(&mut a, L), Ok(&Action(Ok(None))), &log), Ret::Values(1));
+        assert_eq!(call(vec![], |l| logout(l, Ok(&ok), &log)), (Ret::Values(1), vec![Val::Bool(true)]));
+        assert_eq!(call(vec![], |l| logout(l, Ok(&Action(Ok(None))), &log)).0, Ret::Values(1));
         let t = cap.text();
         assert!(t.contains("Mp.Logout() -> true (ended the session of \"Addicted_24_7\")"), "{t}");
         assert!(t.contains("Mp.Logout() -> true (no session was open)"), "{t}");
 
-        let mut a = Arena::with_args(&[]);
         let failed = Action(Err("could not remove [Network] Username: access denied".into()));
-        let r = logout(&mut Stack::new(&mut a, L), Ok(&failed), &log);
+        let (r, pushed) = call(vec![], |l| logout(l, Ok(&failed), &log));
         assert_eq!(r, Ret::Raise("Mp.Logout: could not remove [Network] Username: access denied".into()));
-        assert!(a.results(0).is_empty(), "nothing pushed before a raise");
+        assert!(pushed.is_empty(), "nothing pushed before a raise");
 
-        let mut a = Arena::with_args(&[ArenaArg::Nil]);
-        assert!(matches!(logout(&mut Stack::new(&mut a, L), Ok(&ok), &log), Ret::Raise(m) if m.contains("at most 0")));
-        let mut a = Arena::with_args(&[]);
+        assert!(matches!(call(vec![Val::Nil], |l| logout(l, Ok(&ok), &log)).0, Ret::Raise(m) if m.contains("at most 0")));
         let missing: Result<&dyn LogoutAction, String> = Err("logout used before start-up installed it".into());
-        assert!(matches!(logout(&mut Stack::new(&mut a, L), missing, &log), Ret::Raise(m) if m.contains("before start-up")));
+        assert!(matches!(call(vec![], |l| logout(l, missing, &log)).0, Ret::Raise(m) if m.contains("before start-up")));
     }
 
     #[test]
     fn misuse_and_missing_store_raise() {
         let (log, cap) = logger();
         let st = store(None);
-        let mut a = Arena::with_args(&[ArenaArg::Num]);
-        let r = set_room_key(&mut Stack::new(&mut a, L), Ok(&st), &log);
+        let (r, pushed) = call(vec![Val::Num(1.0)], |l| set_room_key(l, Ok(&st), &log));
         assert_eq!(r, Ret::Raise("Mp.SetRoomKey expects a string or nil, got number".into()));
-        assert!(a.results(1).is_empty(), "nothing pushed before a raise");
+        assert!(pushed.is_empty(), "nothing pushed before a raise");
 
-        let mut a = Arena::with_args(&[ArenaArg::Str("abcdef"), ArenaArg::Str("x")]);
-        assert!(matches!(set_room_key(&mut Stack::new(&mut a, L), Ok(&st), &log), Ret::Raise(m) if m.contains("at most 1")));
-
-        let mut a = Arena::with_args(&[ArenaArg::Table]);
-        assert!(matches!(get_room_key(&mut Stack::new(&mut a, L), Ok(&st), &log), Ret::Raise(m) if m.contains("at most 0")));
+        let two = call(vec![s("abcdef"), s("x")], |l| set_room_key(l, Ok(&st), &log)).0;
+        assert!(matches!(two, Ret::Raise(m) if m.contains("at most 1")));
+        let table = call(vec![Val::Table], |l| get_room_key(l, Ok(&st), &log)).0;
+        assert!(matches!(table, Ret::Raise(m) if m.contains("at most 0")));
 
         let missing = || Err("room key store used before start-up installed it".to_string());
-        let mut a = Arena::with_args(&[]);
-        assert!(matches!(get_room_key(&mut Stack::new(&mut a, L), missing(), &log), Ret::Raise(m) if m.contains("before start-up")));
-        let mut a = Arena::with_args(&[ArenaArg::Str("abcdef")]);
-        assert!(matches!(set_room_key(&mut Stack::new(&mut a, L), missing(), &log), Ret::Raise(m) if m.contains("before start-up")));
+        assert!(matches!(call(vec![], |l| get_room_key(l, missing(), &log)).0, Ret::Raise(m) if m.contains("before start-up")));
+        assert!(matches!(call(vec![s("abcdef")], |l| set_room_key(l, missing(), &log)).0, Ret::Raise(m) if m.contains("before start-up")));
         assert!(cap.text().contains("ERROR Lua Mp.SetRoomKey raises:"), "{}", cap.text());
     }
 }
