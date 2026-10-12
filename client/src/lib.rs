@@ -5,14 +5,15 @@
 //! game's FESL protocol is answered in-process by [`fesl::FeslAdapter`], which talks to the multiplayer
 //! server over HTTPS ([`http`]) on a worker thread ([`worker`]). Module map:
 //!
-//! * game image: [`pe`], [`signature`], [`build_id`];
+//! * game image: [`signature`], [`build_id`] (PE parsing and pattern scanning are `mercs2_formats`');
 //! * ProtoSSL contract: [`protossl`] (ref layout, state values, Send/Recv/Stat return codes) and
 //!   [`vconn`] (connection classification + per-ref virtual connection table);
 //! * services: [`fesl`] (+ [`errors`] for ApiError → FESL error codes, [`curtime`]) and [`theater`];
 //! * backend: [`http`], [`tls`], [`worker`], [`session`]; after login the lobby WebSocket ([`lobby`],
 //!   [`ws`]) and, per game, the DTLS relay shim ([`relay`]) that carries gameplay and voice UDP;
-//! * runtime: [`config`], [`log`], [`m2sdk`] (the shared m2-sdk layer every detour goes through), and the
-//!   Windows-only hook layer in `win`.
+//! * runtime: [`config`], [`log`], the `Mp` Lua namespace ([`lua`]), and the Windows-only hook layer in
+//!   `win`. Every detour and the Lua host go through m2-sdk.dll, the runtime every mod shares
+//!   (`mercs2_formats::mod_runtime`).
 
 pub mod account;
 pub mod build_id;
@@ -24,8 +25,6 @@ pub mod http;
 pub mod lobby;
 pub mod log;
 pub mod lua;
-pub mod m2sdk;
-pub mod pe;
 pub mod protossl;
 pub mod relay;
 pub mod room_key;
