@@ -31,13 +31,12 @@ Start the game and stay on the main menu.
 - The m2-sdk Shipment is installed: `m2-sdk.dll` is in the game root. Without it the ASI is not loaded at all
   and `pmc_blackbox.log` shows `[FAILED] multiplayer_restored.asi`.
 - Log shows, in this order (each line's timestamp shows how long the step before it took):
-  1. `m2-sdk.dll 0.3.x (built against 0.3.1)` (`win/mod.rs:310`);
-  2. `signature <Fn> -> 0x…` for all eight ProtoSSL functions (`:320`), then `build .text sha256 …` (`:322`);
-  3. `lua signature … -> 0x…` (six), `lua script host at 0x…`, `Lua detour installed:
-     ScriptHostRegisterNamespaces at …`, then `script host had not yet created a Lua state at hook time`
-     (`lua/win.rs:208-240`);
-  4. `TLS connector ready (CA bundle loaded)` (`win/mod.rs:326`), `runtime ready (worker thread, connection
-     table)` (`:375`), then `ProtoSSL detours installed: Connect Disconnect Destroy Update Send Recv Stat` (`:377`).
+  1. `m2-sdk.dll 0.4.x (built against 0.4.0)` (`win/mod.rs:326`);
+  2. `signature <Fn> -> 0x…` for all eight ProtoSSL functions (`:331`), then `build .text sha256 …` (`:333`);
+  3. `signature OnlineAccountClear -> 0x… (account name 0x…, password 0x…)` (`lua/win.rs:106`), then `Lua
+     namespace Mp (GetRoomKey, SetRoomKey, Logout) added through m2-sdk.dll` (`lua/win.rs:118`);
+  4. `TLS connector ready (CA bundle loaded)` (`win/mod.rs:337`), `runtime ready (worker thread, connection
+     table)` (`:394`), then `ProtoSSL detours installed: Connect Disconnect Destroy Update Send Recv Stat` (`:396`).
 - **Failure looks like:** a message box naming the problem, then the game exits. Send the box text + log.
 - Send back: the `build .text sha256` value and which exe you ran (retail / bypass / nodrm). That value pins
   the build in the ASI's table.
@@ -68,8 +67,8 @@ After login, open the online game list.
 How the menu Lua (`src/mp_menu.lua`) reaches the front end is undecided — it is not in the manifest — so the
 in-game menu is not part of this run. The ASI still registers the `Mp` namespace:
 
-- Log: `Lua detour installed: ScriptHostRegisterNamespaces at …` and, once the front end is up,
-  `registered Lua namespace Mp …`.
+- Log: `Lua namespace Mp … added through m2-sdk.dll`; and in `m2-sdk.log` (game root), once the front end is
+  up, `registered Lua namespace Mp on lua_State 0x…`.
 - Room keys for steps 6–7 come from `[privacy] room_key` in the ini.
 
 ## 5. Friends path probe
