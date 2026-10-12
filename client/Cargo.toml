@@ -12,6 +12,8 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
+# m2-sdk.dll's bindings (mercs2_formats::mod_runtime), the PE reader and the signature scanner.
+mercs2_formats = { path = "../../../tools/wad_simulator/crates/mercs2_formats" }
 mercs2_plasma_proto = "0.1.0"
 mercs2_mp_api = "0.1.0"
 serde = { version = "1", features = ["derive"] }
