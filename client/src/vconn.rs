@@ -6,6 +6,7 @@
 //! * FESL — the name is one of `[fesl] intercept_names` and `secure` is 1;
 //! * Theater / Messenger — the effective `ip:port` is the loopback endpoint the ASI advertised in the Hello
 //!   reply, with `secure` 0 (Theater/Messenger connect plain, §4 "Who connects how");
+//! * UPnP — any other plain connect: the router fetch of the game's UPnP firewall detector, refused (below);
 //! * anything else — refused.
 //!
 //! A routed connection never opens a socket: the ref keeps `socket = NULL`, Connect leaves state 3
@@ -39,6 +40,13 @@ pub enum Route {
     Fesl,
     Theater,
     Messenger,
+    /// The UPnP firewall detector fetching the router's description (`FUN_009b2ed0` → ProtoUPnP `FUN_009d6990`
+    /// → ProtoHttp `FUN_009ce730` → Connect, `secure` 0). Every direct caller of ProtoHttp's connect paths
+    /// (`FUN_009ce730`, `FUN_009cde20`) is ProtoUPnP or the detector, while FESL, Theater and Messenger connect
+    /// through ProtoAries (`FUN_009cd3f0`), so a plain connect to no advertised endpoint is this one. Refused:
+    /// the relay carries game traffic, so no router port is opened. The detector's result is written only to
+    /// the `HDWR` survey (`NNAT`, `UPNP` in `FUN_009b3230`), which nothing else reads.
+    Upnp(String),
     Refused(String),
 }
 
@@ -77,6 +85,9 @@ pub fn classify(cfg: &Config, secure: bool, host: &[u8], ip: u32, port: u16) -> 
         } else {
             Route::Refused(format!("FESL name requested without TLS ({target}); the game connects FESL with secure=1"))
         };
+    }
+    if !secure {
+        return Route::Upnp(target);
     }
     Route::Refused(format!("no route for {target}: not a configured FESL name and not an advertised endpoint"))
 }
@@ -162,6 +173,13 @@ impl Table {
         self.entries.insert(key, Entry::Refused);
     }
 
+    /// A refusal the design intends, logged at INFO: the game handles the failed connect as it would any.
+    fn refuse_expected(&mut self, key: usize, r: &mut RefView, log: &Logger, why: &str) {
+        log.info(format!("ProtoSSL ref {key:#x}: {why}"));
+        r.set_state(ST_FAIL_CONNECT);
+        self.entries.insert(key, Entry::Refused);
+    }
+
     /// A ref with a live socket that did not come from our Connect.
     fn foreign(&mut self, key: usize, r: &mut RefView, log: &Logger) -> bool {
         if r.socket() == 0 {
@@ -230,6 +248,15 @@ impl Table {
             Route::Messenger => {
                 self.refuse(key, r, log, "Messenger connections are refused by design (friends use FESL asso)")
             }
+            Route::Upnp(target) => self.refuse_expected(
+                key,
+                r,
+                log,
+                &format!(
+                    "UPnP router request refused ({target}): the relay carries game traffic, so no router port \
+                     is opened; the detector times out as on a router without UPnP"
+                ),
+            ),
             Route::Refused(why) => self.refuse(key, r, log, &why),
         }
         0
@@ -484,6 +511,19 @@ mod tests {
         assert_eq!(g.state(), ST_FAIL_CONNECT, "update does not revive a refused ref");
         let log = g.cap.text();
         assert!(log.contains("connection refused: no route for name=\"locate.madserver.net\" ip=0.0.0.0 port=80 secure=1"), "{log}");
+    }
+
+    #[test]
+    fn the_upnp_router_fetch_is_refused_at_info() {
+        // The 2026-10-11 capture: name="192.168.1.1" ip=192.168.1.1 port=34569 secure=0.
+        let mut g = rig();
+        g.connect(false, b"192.168.1.1", 0xc0a8_0101, 34569);
+        assert_eq!(g.state(), ST_FAIL_CONNECT);
+        assert_eq!(g.stat(), -1);
+        let log = g.cap.text();
+        assert!(log.contains("INFO  ProtoSSL ref"), "{log}");
+        assert!(log.contains("UPnP router request refused (name=\"192.168.1.1\" ip=192.168.1.1 port=34569 secure=0)"), "{log}");
+        assert!(!log.contains("ERROR"), "{log}");
     }
 
     #[test]
