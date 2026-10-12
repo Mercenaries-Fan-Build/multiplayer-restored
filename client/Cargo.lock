@@ -1294,7 +1294,9 @@ checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
 
 [[package]]
 name = "loadprobe"
-version = "2.3.0"
+version = "2.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6f3b749de7068aaea489b494e66b3cdffa20fac19ed49e59455d33a0857eed54"
 dependencies = [
  "clap",
  "colored",
@@ -1351,6 +1353,8 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 [[package]]
 name = "mercs2_formats"
 version = "4.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef5715b593bedd8bb2760dcfb959a11aec22b155d52b56d822c23b6e47f70c63"
 dependencies = [
  "aes",
  "cmac",
