@@ -14,9 +14,10 @@ relay, so no player's address is shown to another player.
 | `multiplayer_restored.asi` | `scripts\` | The client plugin. It finds the game's ProtoSSL functions by byte signature and stops the game with a message if the exe does not match. |
 | `multiplayer_restored.ini` | `scripts\` | Required settings; the plugin refuses to start without it, or with a missing or unknown key. |
 
-It requires the [m2-sdk](https://github.com/Mercenaries-Fan-Build/mercs2-sdk) Shipment (`^0.3`), which places
-`m2-sdk.dll` in the game root: the plugin imports it, and every hook it installs goes through the SDK's
-shared MinHook instance. Without that DLL Windows does not load the plugin at all.
+It requires the [m2-sdk](https://github.com/Mercenaries-Fan-Build/mercs2-sdk) Shipment (`^0.4`), which places
+`m2-sdk.dll` in the game root: the plugin imports it, every hook it installs goes through the SDK's shared
+MinHook instance, and its `Mp` Lua namespace is registered through the SDK's Lua host. Without that DLL
+Windows does not load the plugin at all.
 
 ## Setup
 
@@ -43,13 +44,13 @@ The plugin is built from `client/` for `i686-pc-windows-gnu`; the Rust toolchain
 ```bash
 cd client
 bash scripts/fetch_dw2_libgcc.sh   # once per rustc version
-bash scripts/fetch_m2_sdk.sh       # once per m2-sdk version (m2-sdk.version); needs `gh`
 bash scripts/build_asi.sh          # writes ../src/multiplayer_restored.asi
 cargo test
 ```
 
-Needs `i686-w64-mingw32-gcc` on `PATH`. Some tests read the reference executables from the research
-repository, so the full test suite runs only inside that checkout.
+Needs `i686-w64-mingw32-gcc` on `PATH`. The m2-sdk.dll bindings, PE reader and signature scanner come from
+`mercs2_formats` in the research repository's `tools/wad_simulator`, and some tests read the reference
+executables from it, so the client builds and tests inside that checkout.
 
 ## Testing in game
 
