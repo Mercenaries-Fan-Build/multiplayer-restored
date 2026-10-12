@@ -12,9 +12,10 @@ shipment:
 
 load:
   requires:
-    # The ASI imports m2-sdk.dll (its hooks go through the SDK's single MinHook instance); the m2-sdk
-    # Shipment places that DLL in the game root. Without it Windows refuses to load the ASI at all.
-    - { shipment: m2-sdk, version: "^0.3" }
+    # The ASI imports m2-sdk.dll: its hooks go through the SDK's single MinHook instance, and the `Mp` Lua
+    # namespace through the SDK's Lua host. The m2-sdk Shipment places that DLL in the game root; without it
+    # Windows refuses to load the ASI at all.
+    - { shipment: m2-sdk, version: "^0.4" }
 
 contributions:
   # The client ASI (built from client/ by client/scripts/build_asi.sh). It locates the ProtoSSL entry
@@ -33,7 +34,6 @@ contributions:
       - ProtoSSLSend
       - ProtoSSLRecv
       - ProtoSSLStat
-      - ScriptHostRegisterNamespaces
       - "0x009D9A00"
       - "0x009D9B80"
       - "0x009D9950"
@@ -49,10 +49,6 @@ contributions:
       - "0x009DA9B0"
       - "0x009DAA50"
       - "0x009DAB20"
-      # The script host's namespace walker (client/src/lua/signature.rs): detoured to register the `Mp`
-      # Lua namespace on every lua_State the host creates. nodrm_v3 / unpacked, then the v1.1 dump.
-      - "0x005A2C40"
-      - "0x005A2C30"
     # Leading bytes of each signature up to its first wildcard (client/src/signature.rs).
     signature_guard:
       "0x009D9A00": "53 8B 5C 24 0C 56 8B 74 24 0C 8B C6 E8"
@@ -69,8 +65,6 @@ contributions:
       "0x009DA9B0": "53 55 8B 6C 24 10 56 8B 74 24 18 83 CB FF 85 F6 57 8B 7C 24 14"
       "0x009DAA50": "53 8B 5C 24 10 55 8B 6C 24 0C 56 8B B5 24 01 00 00 57 83 CF FF"
       "0x009DAB20": "56 8B 74 24 0C 83 C8 FF 81 FE 6B 63 6F 73 75 20"
-      "0x005A2C40": "53 55 8B 6C 24 0C 56 8B 75 10 57 68"
-      "0x005A2C30": "53 55 8B 6C 24 0C 56 8B 75 10 57 68"
 
   # Required configuration; the ASI reads it from its own folder and refuses to start without it.
   - kind: place_file
