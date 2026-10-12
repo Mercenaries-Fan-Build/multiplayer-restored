@@ -2,7 +2,7 @@
 //!
 //! **Definition:** lowercase hex SHA-256 over the main module's `.text` section bytes as mapped in memory,
 //! covering `min(VirtualSize, SizeOfRawData)` bytes from `ImageBase + VirtualAddress` (see
-//! [`crate::pe::Section::common_len`]). It is computed after the ProtoSSL signatures have resolved — i.e.
+//! [`mercs2_formats::exe_image::SectionHeader::common_len`]). It is computed after the ProtoSSL signatures have resolved — i.e.
 //! after SecuROM has decrypted the code — and **before** any hook is written, so it identifies the
 //! game's own code, not our patches. For an unpacked/no-DRM exe the same value is obtained from the file
 //! on disk (`.text` at `PointerToRawData`), which is how the tests pin the two reference builds.
@@ -17,8 +17,8 @@ pub fn sha256_hex(text: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pe::PeHeaders;
     use crate::testdata;
+    use mercs2_formats::exe_image::Image;
 
     #[test]
     fn reference_builds_have_stable_identities() {
@@ -30,8 +30,9 @@ mod tests {
         ];
         for (exe, want) in expected {
             let bytes = testdata::read_exe(exe);
-            let h = PeHeaders::parse(&bytes).unwrap();
-            let (_, text) = h.file_section(&bytes, ".text").unwrap();
+            let img = Image::from_file(&bytes).unwrap();
+            let text = img.section(".text").unwrap().bytes;
+            assert_eq!(text.len(), 0x704000, "{exe}");
             assert_eq!(sha256_hex(text), want, "{exe}");
         }
     }
