@@ -59,6 +59,7 @@ const ENTITLEMENT_NAME: &str = "Mercenaries 2 UNLOCK 1 PC";
 
 const FSYS: Kind = Kind::new(b"fsys");
 const PNOW: Kind = Kind::new(b"pnow");
+const RANK: Kind = Kind::new(b"rank");
 const FILTER_PREFIX: &str = "players.0.props.{filter-";
 
 #[derive(Debug, Error)]
@@ -129,6 +130,13 @@ struct Filter {
     wanted: String,
 }
 
+/// A rank GetRankedStats waiting for its stats.get answer.
+struct RankGet {
+    tid: u32,
+    owner: i64,
+    keys: Vec<String>,
+}
+
 /// A pnow session waiting for its games.list answer.
 struct Pnow {
     id: i64,
@@ -157,6 +165,7 @@ pub struct FeslAdapter<B: Backend> {
     room_keys: RoomKeyStore,
     pnow: HashMap<u64, Pnow>,
     next_pnow_id: i64,
+    rank_get: HashMap<u64, RankGet>,
 }
 
 fn openssl_random(buf: &mut [u8]) -> Result<(), String> {
@@ -197,6 +206,7 @@ impl<B: Backend> FeslAdapter<B> {
             room_keys,
             pnow: HashMap::new(),
             next_pnow_id: 1,
+            rank_get: HashMap::new(),
         }
     }
 
@@ -252,11 +262,13 @@ impl<B: Backend> FeslAdapter<B> {
         for ev in events {
             match ev {
                 LobbyEvent::Reply { id, result } => {
-                    let p = self
-                        .pnow
-                        .remove(&id)
-                        .ok_or_else(|| FeslFailure::Protocol(format!("lobby reply #{id} matches no pnow session")))?;
-                    self.pnow_status(p, result)?;
+                    if let Some(p) = self.pnow.remove(&id) {
+                        self.pnow_status(p, result)?;
+                    } else if let Some(g) = self.rank_get.remove(&id) {
+                        self.rank_stats(g, result)?;
+                    } else {
+                        return Err(FeslFailure::Protocol(format!("lobby reply #{id} matches no pnow session or rank request")));
+                    }
                 }
                 LobbyEvent::Push(p) => {
                     return Err(FeslFailure::Protocol(format!("lobby push on the FESL handle, which never subscribes: {p:?}")));
@@ -392,6 +404,7 @@ impl<B: Backend> FeslAdapter<B> {
             }
             (b"acct", "Login") => self.login(kind, tid, &txn, &r)?,
             (b"pnow", "Start") => self.pnow_start(kind, tid, &txn, &r)?,
+            (b"rank", "GetRankedStats") => self.rank_get_stats(kind, tid, &txn, &r)?,
             (b"acct", "AddAccount") => self.add_account(kind, tid, &txn, &r)?,
             _ => {
                 let msg = format!("{} {txn} is not implemented by multiplayer_restored {}", kind_name(kind), crate::ASI_VERSION);
@@ -576,6 +589,73 @@ impl<B: Backend> FeslAdapter<B> {
         self.log.info(format!("pnow Start {id} ({} filter(s)) → lobby #{job}: games.list", filters.len()));
         self.pnow.insert(job, Pnow { id, partition, filters });
         Ok(())
+    }
+
+    /// rank GetRankedStats (builder `FUN_009802a0`): `owner`/`ownerType` only when the caller names an owner
+    /// (`test edi,edi` @0x9802d1), else the logged-in player's own stats; then `periodId`, `periodPast` and
+    /// `keys.%d`/`keys.[]` (`FUN_0097a3a0`). A request this cannot serve is answered with an error, which the
+    /// game handles; the connection stays up.
+    fn rank_get_stats(&mut self, kind: Kind, tid: u32, txn: &str, r: &TagFieldReader) -> Result<(), FeslFailure> {
+        let refuse = |a: &mut Self, msg: String| {
+            a.log.error(&msg);
+            a.reply_error(kind, tid, txn, &FeslError { code: GENERIC_ERROR_CODE, message: msg })
+        };
+        let me = self.session.lock().map_err(|_| FeslFailure::Protocol("session lock poisoned".into()))?.as_ref().map(|s| s.user_id.0);
+        let (Some(me), true) = (me, self.lobby.is_some()) else {
+            return refuse(self, format!("rank {txn} before acct Login"));
+        };
+        let owner = r.get_int("owner")?.unwrap_or(me);
+        let Some(count) = r.get_int("keys.[]")? else {
+            return refuse(self, format!("rank {txn} without keys.[]"));
+        };
+        let mut keys = Vec::new();
+        for i in 0..count {
+            let Some(key) = r.get_str(&format!("keys.{i}"))? else {
+                return refuse(self, format!("rank {txn} lists {count} keys but keys.{i} is missing"));
+            };
+            keys.push(key);
+        }
+        if keys.is_empty() {
+            let mut t = TagFields::new();
+            t.set_str("TXN", txn)?;
+            t.set_int("stats.[]", 0)?;
+            return self.reply(kind, tid, &t, txn);
+        }
+        let lobby = self.lobby.as_mut().expect("checked above");
+        let job = lobby
+            .request(Request::StatsGet { owner: mercs2_mp_api::UserId(owner), keys: keys.clone() })
+            .map_err(FeslFailure::Lobby)?;
+        self.log.info(format!("rank {txn} tid {tid} owner {owner} keys {keys:?} → lobby #{job}: stats.get"));
+        self.rank_get.insert(job, RankGet { tid, owner, keys });
+        Ok(())
+    }
+
+    /// The GetRankedStats answer: `stats.%d.key` for every requested key, in the game's order, with
+    /// `stats.%d.value` when the server holds one. The parser (`FUN_009733e0`, `FUN_009734f0`) reads a missing
+    /// value as 0.0, a missing text as empty and a missing rank as 0; the server keeps no text or rank.
+    fn rank_stats(&mut self, g: RankGet, result: Result<Response, mercs2_mp_api::ApiError>) -> Result<(), FeslFailure> {
+        let txn = "GetRankedStats";
+        match result {
+            Ok(Response::Stats(values)) => {
+                let mut t = TagFields::new();
+                t.set_str("TXN", txn)?;
+                t.set_list("stats", &g.keys, |t, prefix, key| {
+                    t.set_str(&format!("{prefix}.key"), key)?;
+                    if let Some(v) = values.iter().find(|v| v.owner.0 == g.owner && &v.key == key) {
+                        t.set_str(&format!("{prefix}.value"), &v.value)?;
+                    }
+                    Ok(())
+                })?;
+                let held = g.keys.iter().filter(|k| values.iter().any(|v| v.owner.0 == g.owner && &v.key == *k)).count();
+                self.log.info(format!("rank {txn} tid {}: owner {} has {held} of {} key(s)", g.tid, g.owner, g.keys.len()));
+                self.reply(RANK, g.tid, &t, txn)
+            }
+            Err(e) => {
+                self.log.warn(format!("rank {txn} tid {}: server refused: {e}", g.tid));
+                self.reply_error(RANK, g.tid, txn, &map_api_error(&e))
+            }
+            Ok(other) => Err(FeslFailure::Protocol(format!("stats.get answered with {other:?}"))),
+        }
     }
 
     fn pnow_status(&mut self, p: Pnow, result: Result<Response, mercs2_mp_api::ApiError>) -> Result<(), FeslFailure> {
@@ -1145,14 +1225,63 @@ mod tests {
     }
 
     #[test]
+    fn rank_get_ranked_stats_answers_every_requested_key() {
+        use mercs2_mp_api::ws::{Request as Wr, Response as Ws, StatValue};
+        let mut r = rig();
+        logged_in(&mut r);
+        r.frames();
+        r.send(&req(b"rank", 4, "TXN=GetRankedStats\nowner=7\nownerType=1\nperiodId=0\nperiodPast=0\nkeys.[]=2\nkeys.0=vz\nkeys.1=kills\n"));
+        let (id, sent) = r.provider.lobby.last();
+        assert_eq!(sent, Wr::StatsGet { owner: mercs2_mp_api::UserId(7), keys: vec!["vz".into(), "kills".into()] });
+        let held = StatValue { owner: mercs2_mp_api::UserId(7), key: "kills".into(), value: "12.0000".into() };
+        r.provider.lobby.reply(id, Ok(Ws::Stats(vec![held])));
+        r.a.pump(r.now).unwrap();
+        let f = r.frames();
+        assert_eq!((f[0].kind, f[0].id), (RANK, 0x8000_0004));
+        assert_eq!(text(&f[0]), "TXN=GetRankedStats\nstats.[]=2\nstats.0.key=vz\nstats.1.key=kills\nstats.1.value=12.0000\n\0");
+        assert!(r.log.text().contains("owner 7 has 1 of 2 key(s)"), "{}", r.log.text());
+
+        // The game's own form (no owner, FUN_009802a0): the logged-in player.
+        r.send(&req(b"rank", 7, "TXN=GetRankedStats\nperiodId=0\nperiodPast=0\nkeys.0=vz\nkeys.[]=1\n"));
+        let (id, sent) = r.provider.lobby.last();
+        assert_eq!(sent, Wr::StatsGet { owner: mercs2_mp_api::UserId(7), keys: vec!["vz".into()] });
+        r.provider.lobby.reply(id, Ok(Ws::Stats(vec![])));
+        r.a.pump(r.now).unwrap();
+        assert_eq!(text(&r.frames()[0]), "TXN=GetRankedStats\nstats.[]=1\nstats.0.key=vz\n\0");
+
+        // A malformed request is answered with an error; the connection stays up.
+        r.send(&req(b"rank", 8, "TXN=GetRankedStats\nkeys.[]=2\nkeys.0=vz\n"));
+        assert!(text(&r.frames()[0]).contains("rank GetRankedStats lists 2 keys but keys.1 is missing"));
+        r.send(&req(b"rank", 9, "TXN=GetRankedStats\nperiodId=0\n"));
+        assert!(text(&r.frames()[0]).contains("rank GetRankedStats without keys.[]"));
+
+        // No keys: answered here; a refused owner: the server's error.
+        r.send(&req(b"rank", 5, "TXN=GetRankedStats\nowner=7\nkeys.[]=0\n"));
+        assert_eq!(text(&r.frames()[0]), "TXN=GetRankedStats\nstats.[]=0\n\0");
+        r.send(&req(b"rank", 6, "TXN=GetRankedStats\nowner=99\nkeys.[]=1\nkeys.0=vz\n"));
+        let (id, _) = r.provider.lobby.last();
+        r.provider.lobby.reply(id, Err(ApiError::new(ErrorCode::NotFound, "user 99")));
+        r.a.pump(r.now).unwrap();
+        assert!(text(&r.frames()[0]).contains("TXN=GetRankedStats\nerrorCode="));
+    }
+
+    #[test]
+    fn rank_get_ranked_stats_before_login_is_refused() {
+        let mut r = rig();
+        r.hello();
+        r.send(&req(b"rank", 3, "TXN=GetRankedStats\nowner=1\nkeys.[]=1\nkeys.0=vz\n"));
+        assert!(text(&r.frames()[0]).contains("rank GetRankedStats before acct Login"));
+    }
+
+    #[test]
     fn unimplemented_txn_gets_a_named_error() {
         let mut r = rig();
         r.hello();
-        r.send(&req(b"rank", 3, "TXN=GetRankedStats\nowner=1\n"));
+        r.send(&req(b"rank", 3, "TXN=UpdateStats\nu.[]=0\n"));
         let f = r.frames();
         assert_eq!(f[0].kind, Kind::new(b"rank"));
-        assert!(text(&f[0]).contains("errorCode=99\nlocalizedMessage=\"rank GetRankedStats is not implemented"));
-        assert!(r.log.text().contains("ERROR rank GetRankedStats is not implemented"));
+        assert!(text(&f[0]).contains("errorCode=99\nlocalizedMessage=\"rank UpdateStats is not implemented"));
+        assert!(r.log.text().contains("ERROR rank UpdateStats is not implemented"));
     }
 
     #[test]
