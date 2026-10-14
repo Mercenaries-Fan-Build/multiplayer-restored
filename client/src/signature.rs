@@ -226,7 +226,7 @@ mod tests {
         // function at one of its expected VAs: the bytes must be the leading fixed bytes of THAT
         // function's pattern and appear at that VA in every reference image where the function sits
         // there (.text file offset == VA - 0x400000 in all three). Detoured: every ProtoSSL entry but
-        // Create (resolved, not detoured).
+        // Create (resolved, not detoured), and both GameSpy Voice functions (crate::voice).
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../manifest.yaml");
         let text = std::fs::read_to_string(&path).unwrap();
         let names: Vec<&str> = testdata::EXES.iter().copied().chain([testdata::V11_DUMP]).collect();
@@ -243,6 +243,9 @@ mod tests {
             for f in ProtoSslFn::ALL.into_iter().filter(|&f| f != ProtoSslFn::Create) {
                 let va = if *image == testdata::V11_DUMP { expected(f) + 0xf0 } else { expected(f) };
                 add(f.name(), f.pattern(), i, va);
+            }
+            for f in crate::voice::VoiceFn::ALL {
+                add(f.name(), f.pattern(), i, crate::voice::tests::expected(image).va(f));
             }
         }
         let mut guards = 0;
