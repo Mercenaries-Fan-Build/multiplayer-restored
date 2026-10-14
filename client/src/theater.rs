@@ -30,7 +30,7 @@
 //! | push join.accepted / join.denied | (joiner) more than 2 players → connection fails; else relay session + alias for the host → EGEG / EGEG `'jden'`+`REASON` ([`game_reason`]) |
 //! | PENT | (host) `players.enter` → reply `PID` |
 //! | PLVT | (host) `players.leave` for that PID → reply `TID` (LAN `FUN_009a10a0`) |
-//! | ECNL | (joiner) `players.leave` for itself → reply `LID GID` |
+//! | ECNL | (joiner) `players.leave` for itself → reply `LID GID`; for the game this client last left without the lobby (host's RGAM, GREM, KICK) → reply `LID GID` here |
 //! | RGAM | (host) `games.close` → reply `LID GID` |
 //! | push game.kicked / game.removed | KICK `LID GID PID` / GREM `LID GID`; relay session ends |
 //!
@@ -188,7 +188,8 @@ pub struct TheaterAdapter {
     pings_unanswered: u32,
     joining: Option<Joining>,
     game: Option<InGame>,
-    /// The game this host last closed with RGAM, whose own ECNL is answered here.
+    /// The game this client last left without a lobby round-trip — closed by this host with RGAM, removed on the
+    /// server (GREM), or kicked from (KICK) — whose ECNL the game then sends is answered here.
     closed: Option<GameId>,
 }
 
@@ -1006,6 +1007,7 @@ impl TheaterAdapter {
                 let mut t = Self::lid_gid(game_id.0)?;
                 t.set_int("PID", g.pid.into()).map_err(tf)?;
                 self.end_game("removed by the host");
+                self.closed = Some(game_id);
                 self.send(Kind::new(b"KICK"), theater::OK, &t, None)?;
             }
             Push::GameRemoved { game_id } => {
@@ -1014,6 +1016,7 @@ impl TheaterAdapter {
                     return Err(format!("game.removed for game {}, which this client is not in", game_id.0));
                 }
                 self.end_game("removed on the server");
+                self.closed = Some(game_id);
                 let t = Self::lid_gid(game_id.0)?;
                 self.send(Kind::new(b"GREM"), theater::OK, &t, None)?;
             }
@@ -1658,6 +1661,29 @@ mod tests {
     }
 
     #[test]
+    fn the_joiners_ecnl_after_grem_or_kick_is_answered_here() {
+        // The server ended the game (removed it, or the host kicked this player): the game then leaves it with
+        // ECNL, which is answered here with no players.leave, since the lobby no longer has the game.
+        for (push, frame) in [(Push::GameRemoved { game_id: GameId(5) }, "GREM"), (Push::Kicked { game_id: GameId(5) }, "KICK")] {
+            let mut r = rig_for(session(8, "Jen"));
+            joining(&mut r);
+            r.lobby.push(Push::JoinAccepted(accepted()));
+            r.pump();
+            r.frames();
+            r.lobby.take_sent();
+            r.lobby.push(push);
+            r.pump();
+            assert_eq!(r.frames().iter().map(|f| f.0.as_str()).collect::<Vec<_>>(), [frame]);
+            r.send(b"ECNL", "LID=1\nGID=5\nTID=6\n");
+            assert_eq!(r.frames(), vec![g("ECNL", "ok", "LID=1\nGID=5\nTID=6\n")], "after {frame}");
+            assert!(r.lobby.take_sent().is_empty(), "after {frame}: no lobby request");
+            // A game this client never left is still refused.
+            let e = r.a.on_game_bytes(&req(b"ECNL", "LID=1\nGID=6\nTID=7\n"), r.now).unwrap_err();
+            assert!(e.contains("ECNL for game 6, which this client is neither in nor joining"), "{e}");
+        }
+    }
+
+    #[test]
     fn the_hosts_second_ecnl_while_rgam_is_pending_fails() {
         let mut r = rig();
         hosting(&mut r);
@@ -1957,7 +1983,7 @@ mod tests {
 }
 
 /// End to end: two Theater adapters on the real lobby WebSocket and the real DTLS relay of an in-process
-/// `mercs2_mp_server`, with UDP sockets standing in for each game's tunnel and voice sockets.
+/// `mercs2_mp_server`, with a UDP socket standing in for each game's tunnel socket.
 #[cfg(test)]
 mod e2e {
     use super::*;
@@ -1972,7 +1998,6 @@ mod e2e {
         a: TheaterAdapter,
         dec: FrameDecoder,
         tunnel: UdpSocket,
-        voice: UdpSocket,
         _provider: crate::ws::WsLobbyProvider,
     }
 
@@ -1985,7 +2010,7 @@ mod e2e {
     fn free_base() -> u16 {
         loop {
             let base = UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-            if base < 65000 && (0..4).all(|i| UdpSocket::bind(("127.0.0.1", base + i)).is_ok()) {
+            if base < 65000 && (0..2).all(|i| UdpSocket::bind(("127.0.0.1", base + i)).is_ok()) {
                 return base;
             }
         }
@@ -1993,13 +2018,12 @@ mod e2e {
 
     fn side(srv: &TestServer, name: &str) -> Side {
         let (provider, session) = srv.provider(name);
-        let (tunnel, voice) = (udp(), udp());
+        let tunnel = udp();
         let (log, _) = capture::logger();
         let relays = ShimFactory {
             settings: ShimSettings {
                 plan: AliasPlan::Ports { ip: Ipv4Addr::LOCALHOST, base_port: free_base() },
                 game_ip: Ipv4Addr::LOCALHOST,
-                game_voice_port: voice.local_addr().unwrap().port(),
                 mtu: 1200,
                 handshake_timeout: Duration::from_secs(5),
                 poll: Duration::from_millis(20),
@@ -2013,7 +2037,7 @@ mod e2e {
             relay_close_grace: Duration::from_secs(5),
         });
         let a = TheaterAdapter::new(settings, provider.handle(true).unwrap(), session, RoomKeyStore::new(None), Arc::new(relays), log);
-        Side { a, dec: FrameDecoder::new(1 << 20), tunnel, voice, _provider: provider }
+        Side { a, dec: FrameDecoder::new(1 << 20), tunnel, _provider: provider }
     }
 
     impl Side {
@@ -2048,15 +2072,14 @@ mod e2e {
     }
 
     /// Pump both sides while sending `payload` until `rx` gets it; returns the source `rx` saw.
-    fn deliver(host: &mut Side, joiner: &mut Side, from_host: bool, voice: bool, to: SocketAddr, payload: &[u8]) -> SocketAddr {
+    fn deliver(host: &mut Side, joiner: &mut Side, from_host: bool, to: SocketAddr, payload: &[u8]) -> SocketAddr {
         let mut buf = [0u8; 2048];
         wait("a game datagram through the relay", || {
             host.a.pump(Instant::now()).unwrap();
             joiner.a.pump(Instant::now()).unwrap();
             let (s, r) = if from_host { (&*host, &*joiner) } else { (&*joiner, &*host) };
-            let (tx, rx) = if voice { (&s.voice, &r.voice) } else { (&s.tunnel, &r.tunnel) };
-            tx.send_to(payload, to).unwrap();
-            match rx.recv_from(&mut buf) {
+            s.tunnel.send_to(payload, to).unwrap();
+            match r.tunnel.recv_from(&mut buf) {
                 Ok((n, src)) if &buf[..n] == payload => Some(src),
                 _ => None,
             }
@@ -2106,17 +2129,17 @@ mod e2e {
         let host_as_seen_by_joiner = addr(&egeg, "I", "P");
         assert_eq!(addr(&egrq, "R-INT-IP", "R-INT-PORT"), joiner_as_seen_by_host);
         assert_eq!(addr(&egeg, "INT-IP", "INT-PORT"), host_as_seen_by_joiner);
-        let src = deliver(&mut host, &mut joiner, true, false, joiner_as_seen_by_host, b"tunnel h->j");
+        let src = deliver(&mut host, &mut joiner, true, joiner_as_seen_by_host, b"tunnel h->j");
         assert_eq!(src, host_as_seen_by_joiner);
-        let src = deliver(&mut host, &mut joiner, false, false, host_as_seen_by_joiner, b"tunnel j->h");
+        let src = deliver(&mut host, &mut joiner, false, host_as_seen_by_joiner, b"tunnel j->h");
         assert_eq!(src, joiner_as_seen_by_host);
-        // Voice goes to the peer's address on the voice port (the game's fixed 55123 in production).
-        let voice_of = |seen: SocketAddr| SocketAddr::new(seen.ip(), seen.port() + 1);
-        deliver(&mut host, &mut joiner, true, true, voice_of(joiner_as_seen_by_host), b"voice h->j");
-        deliver(&mut host, &mut joiner, false, true, voice_of(host_as_seen_by_joiner), b"voice j->h");
 
         host.send(b"RGAM", &format!("LID=1\nGID={gid}\nTID=6\n"));
         assert_eq!(host.until(b"RGAM").id, 0);
         assert_eq!(get(&joiner.until(b"GREM"), "GID"), gid);
+        // The joiner's game leaves the game the server removed: answered here, no lobby round-trip.
+        joiner.send(b"ECNL", &format!("LID=1\nGID={gid}\nTID=7\n"));
+        let ecnl = joiner.until(b"ECNL");
+        assert_eq!((ecnl.id, get(&ecnl, "GID")), (0, gid));
     }
 }
