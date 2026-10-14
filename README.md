@@ -11,7 +11,7 @@ relay, so no player's address is shown to another player.
 
 | File | Where | What it is |
 |---|---|---|
-| `multiplayer_restored.asi` | `scripts\` | The client plugin. It finds the game's ProtoSSL functions by byte signature and stops the game with a message if the exe does not match. |
+| `multiplayer_restored.asi` | `scripts\` | The client plugin. It finds the game's ProtoSSL and GameSpy Voice functions by byte signature and stops the game with a message if the exe does not match. |
 | `multiplayer_restored.ini` | `scripts\` | Required settings; the plugin refuses to start without it, or with a missing or unknown key. |
 
 It requires the [m2-sdk](https://github.com/Mercenaries-Fan-Build/mercs2-sdk) Shipment (`^0.4`), which places
@@ -30,6 +30,10 @@ Windows does not load the plugin at all.
 3. Start the game, choose the online option and create an account or log in.
 
 Games hold at most two players: the host and one joiner.
+
+The game's built-in voice chat (GameSpy Voice) is turned off: the plugin detours its start-up so it never
+opens a socket or an audio device. Use external voice chat such as Discord. Both players need the same
+plugin version; a player whose plugin still forwards in-game voice ends the session with a message saying so.
 
 ## Running a server
 

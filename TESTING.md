@@ -31,12 +31,14 @@ Start the game and stay on the main menu.
 - The m2-sdk Shipment is installed: `m2-sdk.dll` is in the game root. Without it the ASI is not loaded at all
   and `pmc_blackbox.log` shows `[FAILED] multiplayer_restored.asi`.
 - Log shows, in this order (each line's timestamp shows how long the step before it took):
-  1. `m2-sdk.dll 0.4.x (built against 0.4.0)` (`win/mod.rs:326`);
-  2. `signature <Fn> -> 0x…` for all eight ProtoSSL functions (`:331`), then `build .text sha256 …` (`:333`);
+  1. `m2-sdk.dll 0.4.x (built against 0.4.0)` (`win/mod.rs:346`);
+  2. `signature <Fn> -> 0x…` for all eight ProtoSSL functions (`:351`), then `build .text sha256 …` (`:353`),
+     then `signature GVInitialize -> 0x…` and `signature GVStartup -> 0x…` (`:356`);
   3. `signature OnlineAccountClear -> 0x… (account name 0x…, password 0x…)` (`lua/win.rs:106`), then `Lua
      namespace Mp (GetRoomKey, SetRoomKey, Logout) added through m2-sdk.dll` (`lua/win.rs:118`);
-  4. `TLS connector ready (CA bundle loaded)` (`win/mod.rs:337`), `runtime ready (worker thread, connection
-     table)` (`:394`), then `ProtoSSL detours installed: Connect Disconnect Destroy Update Send Recv Stat` (`:396`).
+  4. `TLS connector ready (CA bundle loaded)` (`win/mod.rs:361`), `runtime ready (worker thread, connection
+     table)` (`:417`), then `ProtoSSL detours installed: Connect Disconnect Destroy Update Send Recv Stat` (`:419`)
+     and `GameSpy Voice disabled (GVInitialize, GVStartup detoured); use external voice chat` (`:420`).
 - **Failure looks like:** a message box naming the problem, then the game exits. Send the box text + log.
 - Send back: the `build .text sha256` value and which exe you ran (retail / bypass / nodrm). That value pins
   the build in the ASI's table.
@@ -82,18 +84,23 @@ Click through every Friends screen, including **Find Friend** (type any name).
 
 PC **A** hosts, PC **B** joins. Put **B behind a phone hotspot** (CGNAT) if you can.
 
-1. A: host a co-op game. Log A: `hosting game G (relay slot 0)` (`theater.rs:657`). Send the MAX-PLAYERS
+1. A: host a co-op game. Log A: `hosting game G (relay slot 0)` (`theater.rs:854`). Send the MAX-PLAYERS
    value from the CGAM line — if the server refuses because it is above 2, the log says so.
 2. B: open the list → A's game appears (`pnow Status N: 1 game(s)`). Join it.
-   - Log B: `join request J for game G queued with the host` (`:667`).
-   - Log A: `join request J: "<B>" (user …) asks to join game G` (`:787`).
-   - Log B: `joined game G hosted by "<A>" as PID P` (`:853`), `relay slot 0 of game G is 127.0.0.2:10010 …`
-     (`relay.rs:596`).
-3. Both in game: play a few minutes — move, shoot, enter a vehicle together, use voice chat if you have mics.
-   - Any `alias for slot … got a datagram from …, not the game; dropped` (`relay.rs:545`) or
-     `relay session for game G failed: …` (`:249`) → send the log.
+   - Log B: `join request J for game G queued with the host` (`:864`).
+   - Log A: `join request J: "<B>" (user …) asks to join game G` (`:991`).
+   - Log B: `joined game G hosted by "<A>" as PID P` (`:1068`), `relay slot 0 of game G is 127.0.0.2:10010 …`
+     (`relay.rs:553`).
+   - Neither game crashes on the join; the game's built-in voice chat stays off (no `GVInitialize` socket),
+     on every OS.
+3. Both in game: play a few minutes — move, shoot, enter a vehicle together.
+   - Any `alias for slot … got a datagram from …, not the game; dropped` (`relay.rs:515`) or
+     `relay session for game G failed: …` (`:215`) → send the log.
 4. Network check on B: `netstat -ano | findstr <A's public IP>` shows nothing. B only talks to the server.
 5. B leaves → A logs `game G: "<B>" (PID P) left`. A ends the game → B (if still listed) sees it vanish.
+6. Host quits while B is in: A ends or quits the game → B's log shows `game G: removed on the server; relay
+   session ends`, then the game's ECNL is answered once (no `ECNL for game G, which this client is neither in
+   nor joining` errors and no repeated `a new Theater connection takes over` lines); B returns to the lobby.
 
 ## 7. Room keys between two PCs
 

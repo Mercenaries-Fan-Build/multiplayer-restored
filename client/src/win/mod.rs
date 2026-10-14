@@ -9,7 +9,8 @@
 //! 4. add the `Mp` Lua namespace through m2-sdk.dll's Lua host at once ([`crate::lua::win::install`]): the
 //!    game creates its Lua state early in start-up, and `Mp` must be registered on it;
 //! 5. build the TLS connector, worker thread and runtime, then detour ProtoSSL (the game reaches
-//!    ProtoSSLConnect only from the front end, long after start-up).
+//!    ProtoSSLConnect only from the front end, long after start-up) and GameSpy Voice ([`crate::voice`]:
+//!    `GVInitialize` and `GVStartup` do nothing, so in-game voice never starts).
 //!
 //! Each step is logged as it finishes, so the log's timestamps show where start-up spends its time.
 //!
@@ -39,13 +40,14 @@ use crate::fesl::{FeslAdapter, FeslSettings};
 use crate::http::HttpsClient;
 use crate::lobby::LobbyProvider;
 use crate::log::Logger;
-use crate::relay::{AliasPlan, GAME_VOICE_PORT, RelayFactory, ShimFactory, ShimSettings};
+use crate::relay::{AliasPlan, RelayFactory, ShimFactory, ShimSettings};
 use crate::theater::{TheaterAdapter, TheaterSettings};
 use crate::ws::{WsLobbyProvider, WsSettings};
 use crate::protossl::{REF_SIZE, RefView};
 use crate::session::SessionSlot;
 use crate::signature::{CODE_SECTION, ProtoSslFn, Resolved, resolve};
 use crate::vconn::{ConnectArgs, ConnectEnv, Service, ServiceFactory, Table};
+use crate::voice::{VoiceFn, VoiceSites};
 use mercs2_formats::exe_image::{self, Image};
 use mercs2_formats::mod_runtime as rt;
 use crate::worker::{RestApi, Worker};
@@ -191,6 +193,16 @@ unsafe extern "C" fn hook_destroy(r: *mut u8) {
     unsafe { orig(r) }
 }
 
+/// `GVInitialize` replacement: no Winsock start-up, no socket, no bind; reports failure (its callers ignore
+/// the result). It takes the peer address string in EDI, which this never reads.
+unsafe extern "C" fn hook_gv_initialize() -> u32 {
+    0
+}
+
+/// `GVStartup` replacement: no device enumeration and no DirectSound devices, so the caller takes the
+/// game's own no-voice branch.
+unsafe extern "C" fn hook_gv_startup() {}
+
 /// True when `[ptr, ptr+len)` is committed and readable.
 fn readable(ptr: *const u8, len: usize) -> bool {
     let end = ptr as usize + len;
@@ -259,7 +271,7 @@ fn wait_for_image(cfg: &Config, log: &Logger) -> Game {
     }
 }
 
-fn install_hooks(img: &Game, log: &Logger) {
+fn install_hooks(img: &Game, voice: &VoiceSites, log: &Logger) {
     let target = |f: ProtoSslFn| img.resolved.va(f) as usize as *mut c_void;
     // Disconnect and Destroy call the original; the SDK writes their trampolines before enabling each hook.
     let hooks: [(ProtoSslFn, *mut c_void, Option<&AtomicUsize>); 7] = [
@@ -273,6 +285,14 @@ fn install_hooks(img: &Game, log: &Logger) {
     ];
     for (f, detour, orig) in hooks {
         unsafe { rt::hook_attach(target(f), detour, orig, f.name()) }.unwrap_or_else(|e| fatal(Some(log), &e));
+    }
+    let voice_hooks: [(VoiceFn, *mut c_void); 2] = [
+        (VoiceFn::Initialize, hook_gv_initialize as *mut c_void),
+        (VoiceFn::Startup, hook_gv_startup as *mut c_void),
+    ];
+    for (f, detour) in voice_hooks {
+        unsafe { rt::hook_attach(voice.va(f) as usize as *mut c_void, detour, None, f.name()) }
+            .unwrap_or_else(|e| fatal(Some(log), &e));
     }
 }
 
@@ -331,6 +351,10 @@ fn init(hinst: usize) {
         log.info(format!("signature {} -> {:#x}", f.name(), img.resolved.va(f)));
     }
     log.info(format!("build .text sha256 {build}"));
+    let voice = crate::voice::resolve(&img.image).unwrap_or_else(|e| fatal(Some(&log), &format!("unsupported game build: {e}")));
+    for f in VoiceFn::ALL {
+        log.info(format!("signature {} -> {:#x}", f.name(), voice.va(f)));
+    }
     crate::lua::win::install(&img.image, &log, fatal);
 
     let connector = crate::tls::mozilla_connector().unwrap_or_else(|e| fatal(Some(&log), &format!("TLS setup: {e}")));
@@ -350,7 +374,6 @@ fn init(hinst: usize) {
         settings: ShimSettings {
             plan: AliasPlan::Loopback { base: cfg.relay.alias_base, tunnel_port: cfg.relay.alias_tunnel_port },
             game_ip: std::net::Ipv4Addr::LOCALHOST,
-            game_voice_port: GAME_VOICE_PORT,
             mtu: cfg.relay.dtls_mtu,
             handshake_timeout: Duration::from_millis(cfg.relay.handshake_timeout_ms.into()),
             poll: Duration::from_millis(cfg.relay.poll_interval_ms.into()),
@@ -392,8 +415,9 @@ fn init(hinst: usize) {
         fatal(Some(&log), "runtime initialised twice");
     }
     log.info("runtime ready (worker thread, connection table)");
-    install_hooks(&img, &log);
+    install_hooks(&img, &voice, &log);
     log.info("ProtoSSL detours installed: Connect Disconnect Destroy Update Send Recv Stat");
+    log.info("GameSpy Voice disabled (GVInitialize, GVStartup detoured); use external voice chat");
 }
 
 /// # Safety
