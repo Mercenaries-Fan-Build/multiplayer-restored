@@ -1,31 +1,27 @@
-//! Relay shim: the game's gameplay (ProtoTunnel) and voice UDP, carried through the server's DTLS relay.
+//! Relay shim: the game's gameplay UDP (ProtoTunnel), carried through the server's DTLS relay.
 //!
 //! Per game, one DTLS 1.2 client association (OpenSSL) to the relay in the [`RelayAssignment`], pinned to
 //! `cert_sha256` (any other leaf certificate fails the handshake), authenticated by
 //! `Datagram::Hello{session_token}` (`mercs2_mp_api::relay`). Every other player in the game is shown to the local
 //! game as a loopback **alias** — relay slot `s` ↔ `alias_base + s` under the production [`AliasPlan`] —
-//! with one UDP socket on the alias's tunnel port and one on the voice port:
+//! with one UDP socket on the alias's tunnel port:
 //!
-//! * game → alias socket → `Data{slot, channel}` → relay → that peer's shim;
-//! * relay → `Data{slot, channel}` → sent *from* the alias socket to the game's own socket
-//!   (`127.0.0.1:<game tunnel port>` / `127.0.0.1:55123`), so the game sees the datagram coming from the
-//!   address Theater gave it for that peer.
+//! * game → alias socket → `Data{slot, Tunnel}` → relay → that peer's shim;
+//! * relay → `Data{slot, Tunnel}` → sent *from* the alias socket to the game's own tunnel socket
+//!   (`127.0.0.1:<game tunnel port>`), so the game sees the datagram coming from the address Theater gave it
+//!   for that peer.
 //!
 //! Why this needs no game patching (`multiplayer_rewrite_re.md` §6–§7): ProtoTunnel sends to the Theater
 //! `I/P` / `INT-IP/INT-PORT` pair (the Theater adapter gives both the alias), its payloads are RC4-encrypted
-//! end to end and carry their own clientId, so the relay forwards them opaquely; GameSpy Voice binds
-//! `0.0.0.0:55123` and sends to `inet_addr(peer):55123` (`FUN_00846f40`, `htons(0xd753)`), where the peer
-//! string is printed from the session's peer address object (`FUN_0096c000`) — the same address-object type
-//! the EGEG/EGRQ parsers fill from Theater (`FUN_0096bf90`); that it is the Theater-supplied peer is
-//! INFERRED. With an alias as the peer, voice lands on the alias's voice socket without a hook.
+//! end to end and carry their own clientId, so the relay forwards them opaquely.
+//!
+//! **Voice.** The game's GameSpy Voice is detoured off ([`crate::voice`]), so the game never sends voice and
+//! this shim carries none: a `Data{.., Voice}` datagram from the relay means the peer runs a client that still
+//! forwards in-game voice, and fails the session with a message saying so.
 //!
 //! **Ports.** The alias tunnel port is `[relay] alias_tunnel_port`, required to differ from the game's own
-//! tunnel port (the game binds `0.0.0.0:10000`, `FUN_00844770`), so tunnel aliases never share a port with
-//! the game's wildcard bind. Voice cannot avoid it: the game hard-codes 55123 as the destination, so each
-//! alias binds `127.0.0.N:55123` next to the game's `0.0.0.0:55123`. Windows allows a specific-address bind
-//! next to a wildcard bind on the same port when neither socket uses `SO_EXCLUSIVEADDRUSE`, and delivers to
-//! the most specific match — INFERRED from the Winsock documentation, only verifiable on Windows. A failed
-//! alias bind is a loud error naming the address, never a silent fallback.
+//! tunnel port (the game binds `0.0.0.0:10000`, `FUN_00844770`), so aliases never share a port with the
+//! game's wildcard bind. A failed alias bind is a loud error naming the address, never a silent fallback.
 //!
 //! On Windows the alias sockets have `SIO_UDP_CONNRESET` turned off: otherwise one datagram sent to a game
 //! port that is not (or no longer) bound makes the next `recvfrom` fail with `WSAECONNRESET`.
@@ -58,9 +54,6 @@ use openssl::ssl::{ErrorCode, Ssl, SslContext, SslMethod, SslStream, SslVerifyMo
 
 use crate::log::Logger;
 
-/// GameSpy Voice port: the game binds and sends to it (`FUN_00846f40`: `htons(0xd753)`).
-pub const GAME_VOICE_PORT: u16 = 55123;
-
 /// `DTLS_CTRL_HANDLE_TIMEOUT` from OpenSSL's `ssl.h` (`DTLSv1_handle_timeout` is a macro over `SSL_ctrl`).
 const DTLS_CTRL_HANDLE_TIMEOUT: std::os::raw::c_int = 74;
 
@@ -69,50 +62,26 @@ const MAX_DATAGRAM: usize = 65535;
 /// Where peer aliases live.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AliasPlan {
-    /// Production: slot `s` is `base + s`, tunnel on `tunnel_port`, voice on [`GAME_VOICE_PORT`].
+    /// Production: slot `s` is `base + s` on `tunnel_port`.
     Loopback { base: Ipv4Addr, tunnel_port: u16 },
-    /// Tests on hosts where only 127.0.0.1 exists (macOS): every alias on `ip`, tunnel on
-    /// `base_port + 2s`, voice on `base_port + 2s + 1`.
+    /// Tests on hosts where only 127.0.0.1 exists (macOS): every alias on `ip`, slot `s` on `base_port + s`.
     #[cfg(test)]
     Ports { ip: Ipv4Addr, base_port: u16 },
 }
 
 impl AliasPlan {
-    pub fn alias(&self, slot: u8, channel: Channel) -> Result<SocketAddrV4, String> {
+    /// The alias the game sees for the peer in `slot`.
+    pub fn alias(&self, slot: u8) -> Result<SocketAddrV4, String> {
         match *self {
             AliasPlan::Loopback { base, tunnel_port } => {
                 let o = base.octets();
                 let last = o[3]
                     .checked_add(slot)
                     .ok_or_else(|| format!("relay slot {slot} does not fit an alias above {base} (last octet overflows)"))?;
-                let ip = Ipv4Addr::new(o[0], o[1], o[2], last);
-                let port = match channel {
-                    Channel::Tunnel => tunnel_port,
-                    Channel::Voice => GAME_VOICE_PORT,
-                };
-                Ok(SocketAddrV4::new(ip, port))
+                Ok(SocketAddrV4::new(Ipv4Addr::new(o[0], o[1], o[2], last), tunnel_port))
             }
             #[cfg(test)]
-            AliasPlan::Ports { ip, base_port } => {
-                let off = u16::from(slot) * 2 + matches!(channel, Channel::Voice) as u16;
-                Ok(SocketAddrV4::new(ip, base_port + off))
-            }
-        }
-    }
-}
-
-/// The local game's own sockets, where relay datagrams are delivered.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct GameEndpoints {
-    pub tunnel: SocketAddrV4,
-    pub voice: SocketAddrV4,
-}
-
-impl GameEndpoints {
-    fn for_channel(&self, c: Channel) -> SocketAddrV4 {
-        match c {
-            Channel::Tunnel => self.tunnel,
-            Channel::Voice => self.voice,
+            AliasPlan::Ports { ip, base_port } => Ok(SocketAddrV4::new(ip, base_port + u16::from(slot))),
         }
     }
 }
@@ -154,7 +123,6 @@ pub struct ShimSettings {
     pub plan: AliasPlan,
     /// The game's address (it binds its sockets to 0.0.0.0; loopback reaches them).
     pub game_ip: Ipv4Addr,
-    pub game_voice_port: u16,
     pub mtu: u32,
     pub handshake_timeout: Duration,
     pub poll: Duration,
@@ -168,11 +136,8 @@ pub struct ShimFactory {
 
 impl RelayFactory for ShimFactory {
     fn start(&self, game: GameId, a: &RelayAssignment, game_tunnel_port: u16) -> Result<Box<dyn RelayLink>, String> {
-        let endpoints = GameEndpoints {
-            tunnel: SocketAddrV4::new(self.settings.game_ip, game_tunnel_port),
-            voice: SocketAddrV4::new(self.settings.game_ip, self.settings.game_voice_port),
-        };
-        Ok(Box::new(RelayShim::start(game, a, endpoints, self.settings, self.log.clone())?))
+        let game_tunnel = SocketAddrV4::new(self.settings.game_ip, game_tunnel_port);
+        Ok(Box::new(RelayShim::start(game, a, game_tunnel, self.settings, self.log.clone())?))
     }
 }
 
@@ -237,8 +202,9 @@ struct Inner {
     closed_by_relay: AtomicBool,
     session: Mutex<Option<Session>>,
     early_drops: AtomicU64,
-    aliases: Mutex<HashMap<(u8, Channel), Arc<UdpSocket>>>,
-    endpoints: GameEndpoints,
+    aliases: Mutex<HashMap<u8, Arc<UdpSocket>>>,
+    /// The game's own tunnel socket, where relay datagrams are delivered.
+    game_tunnel: SocketAddrV4,
 }
 
 impl Inner {
@@ -256,30 +222,37 @@ impl Inner {
         self.stop.load(Ordering::Acquire)
     }
 
-    /// A datagram from the game for the peer in `slot`.
-    fn game_datagram(&self, slot: u8, channel: Channel, payload: &[u8]) -> Result<(), String> {
+    /// A gameplay datagram from the game for the peer in `slot`.
+    fn game_datagram(&self, slot: u8, payload: &[u8]) -> Result<(), String> {
         let mut guard = self.session.lock().map_err(|_| "relay session lock poisoned".to_string())?;
         match guard.as_mut() {
             None => {
                 self.early_drops.fetch_add(1, Ordering::Relaxed);
                 Ok(())
             }
-            Some(s) => s.write(&Datagram::Data { slot, channel, payload }),
+            Some(s) => s.write(&Datagram::Data { slot, channel: Channel::Tunnel, payload }),
         }
     }
 
     /// A plaintext datagram from the relay.
     fn relay_datagram(&self, bytes: &[u8]) -> Result<(), String> {
         match Datagram::decode(bytes).map_err(|e| format!("malformed datagram from the relay: {e}"))? {
-            Datagram::Data { slot, channel, payload } => {
-                let sock = self.aliases.lock().map_err(|_| "alias table lock poisoned".to_string())?.get(&(slot, channel)).cloned();
+            Datagram::Data { slot, channel: Channel::Voice, payload } => Err(format!(
+                "relay slot {slot} sent a voice datagram ({} bytes) in game {}: that player's multiplayer_restored still \
+                 forwards in-game voice, which this version disables; both players need multiplayer_restored {}",
+                payload.len(),
+                self.game.0,
+                crate::ASI_VERSION
+            )),
+            Datagram::Data { slot, channel: Channel::Tunnel, payload } => {
+                let sock = self.aliases.lock().map_err(|_| "alias table lock poisoned".to_string())?.get(&slot).cloned();
                 match sock {
                     Some(s) => {
-                        let to = self.endpoints.for_channel(channel);
-                        s.send_to(payload, to).map_err(|e| format!("delivering a {channel:?} datagram from slot {slot} to the game at {to}: {e}"))?;
+                        let to = self.game_tunnel;
+                        s.send_to(payload, to).map_err(|e| format!("delivering a datagram from slot {slot} to the game at {to}: {e}"))?;
                     }
                     None => self.log.warn(format!(
-                        "relay datagram ({channel:?}, {} bytes) from slot {slot}, which has no alias in game {}; dropped",
+                        "relay datagram ({} bytes) from slot {slot}, which has no alias in game {}; dropped",
                         payload.len(),
                         self.game.0
                     )),
@@ -293,7 +266,7 @@ impl Inner {
 
 struct Peer {
     stop: Arc<AtomicBool>,
-    threads: Vec<JoinHandle<()>>,
+    thread: JoinHandle<()>,
 }
 
 pub struct RelayShim {
@@ -341,9 +314,9 @@ fn disable_connreset(_sock: &UdpSocket) -> Result<(), String> {
 }
 
 impl RelayShim {
-    pub fn start(game: GameId, a: &RelayAssignment, endpoints: GameEndpoints, s: ShimSettings, log: Logger) -> Result<Self, String> {
+    pub fn start(game: GameId, a: &RelayAssignment, game_tunnel: SocketAddrV4, s: ShimSettings, log: Logger) -> Result<Self, String> {
         match s.plan {
-            AliasPlan::Loopback { tunnel_port, .. } if tunnel_port == endpoints.tunnel.port() => {
+            AliasPlan::Loopback { tunnel_port, .. } if tunnel_port == game_tunnel.port() => {
                 return Err(format!(
                     "[relay] alias_tunnel_port {tunnel_port} equals the game's own tunnel port; aliases must use another port"
                 ));
@@ -367,7 +340,7 @@ impl RelayShim {
             session: Mutex::new(None),
             early_drops: AtomicU64::new(0),
             aliases: Mutex::new(HashMap::new()),
-            endpoints,
+            game_tunnel,
         });
         let (thread_inner, assignment) = (inner.clone(), a.clone());
         // Not joined on drop: it may be resolving the relay host name; it exits within one poll interval of
@@ -382,10 +355,7 @@ impl RelayShim {
                 }
             })
             .map_err(|e| format!("cannot start the relay thread: {e}"))?;
-        log.info(format!(
-            "relay session for game {}: {}:{} slot {}, game tunnel {}, game voice {}",
-            game.0, a.host, a.port, a.local_slot, endpoints.tunnel, endpoints.voice
-        ));
+        log.info(format!("relay session for game {}: {}:{} slot {}, game tunnel {game_tunnel}", game.0, a.host, a.port, a.local_slot));
         Ok(RelayShim { inner, plan: s.plan, local_slot: a.local_slot, poll: s.poll, peers: HashMap::new() })
     }
 }
@@ -535,24 +505,24 @@ fn relay_thread(inner: &Inner, a: &RelayAssignment, s: &ShimSettings, pinned: &s
     }
 }
 
-fn alias_thread(inner: Arc<Inner>, stop: Arc<AtomicBool>, sock: Arc<UdpSocket>, slot: u8, channel: Channel) {
-    let from_game = inner.endpoints.for_channel(channel).port();
+fn alias_thread(inner: Arc<Inner>, stop: Arc<AtomicBool>, sock: Arc<UdpSocket>, slot: u8) {
+    let from_game = inner.game_tunnel.port();
     let mut buf = vec![0u8; MAX_DATAGRAM];
     while !stop.load(Ordering::Acquire) && !inner.stopped() {
         match sock.recv_from(&mut buf) {
             Ok((n, src)) => {
                 if !src.ip().is_loopback() || src.port() != from_game {
-                    inner.log.warn(format!("alias for slot {slot} ({channel:?}) got a datagram from {src}, not the game; dropped"));
+                    inner.log.warn(format!("alias for slot {slot} got a datagram from {src}, not the game; dropped"));
                     continue;
                 }
-                if let Err(e) = inner.game_datagram(slot, channel, &buf[..n]) {
+                if let Err(e) = inner.game_datagram(slot, &buf[..n]) {
                     inner.fail(e);
                     return;
                 }
             }
             Err(e) if is_timeout(&e) => {}
             Err(e) => {
-                inner.fail(format!("alias socket for slot {slot} ({channel:?}): {e}"));
+                inner.fail(format!("alias socket for slot {slot}: {e}"));
                 return;
             }
         }
@@ -567,46 +537,31 @@ impl RelayLink for RelayShim {
         if self.peers.contains_key(&slot) {
             return Err(format!("relay slot {slot} already has an alias"));
         }
+        let addr = self.plan.alias(slot)?;
+        let sock = UdpSocket::bind(addr).map_err(|e| format!("binding alias {addr} for relay slot {slot}: {e}"))?;
+        sock.set_read_timeout(Some(self.poll)).map_err(|e| format!("alias {addr} timeout: {e}"))?;
+        disable_connreset(&sock).map_err(|e| format!("alias {addr}: {e}"))?;
+        let sock = Arc::new(sock);
+        self.inner.aliases.lock().map_err(|_| "alias table lock poisoned".to_string())?.insert(slot, sock.clone());
         let stop = Arc::new(AtomicBool::new(false));
-        let mut threads = Vec::new();
-        let mut bound = Vec::new();
-        for channel in [Channel::Tunnel, Channel::Voice] {
-            let addr = self.plan.alias(slot, channel)?;
-            let sock = UdpSocket::bind(addr).map_err(|e| format!("binding alias {addr} for relay slot {slot} ({channel:?}): {e}"))?;
-            sock.set_read_timeout(Some(self.poll)).map_err(|e| format!("alias {addr} timeout: {e}"))?;
-            disable_connreset(&sock).map_err(|e| format!("alias {addr}: {e}"))?;
-            bound.push((channel, Arc::new(sock)));
-        }
-        {
-            let mut aliases = self.inner.aliases.lock().map_err(|_| "alias table lock poisoned".to_string())?;
-            for (channel, sock) in &bound {
-                aliases.insert((slot, *channel), sock.clone());
-            }
-        }
-        for (channel, sock) in bound {
-            let (inner, stop) = (self.inner.clone(), stop.clone());
-            let t = std::thread::Builder::new()
-                .name(format!("mp-restored-alias-{slot}-{channel:?}"))
-                .spawn(move || alias_thread(inner, stop, sock, slot, channel))
-                .map_err(|e| format!("cannot start the alias thread for slot {slot}: {e}"))?;
-            threads.push(t);
-        }
-        self.peers.insert(slot, Peer { stop, threads });
-        let tunnel = self.plan.alias(slot, Channel::Tunnel)?;
-        self.inner.log.info(format!("relay slot {slot} of game {} is {tunnel} for the game", self.inner.game.0));
-        Ok(PeerAddr { ip: *tunnel.ip(), tunnel_port: tunnel.port() })
+        let (inner, thread_stop) = (self.inner.clone(), stop.clone());
+        let thread = std::thread::Builder::new()
+            .name(format!("mp-restored-alias-{slot}"))
+            .spawn(move || alias_thread(inner, thread_stop, sock, slot))
+            .map_err(|e| format!("cannot start the alias thread for slot {slot}: {e}"))?;
+        self.peers.insert(slot, Peer { stop, thread });
+        self.inner.log.info(format!("relay slot {slot} of game {} is {addr} for the game", self.inner.game.0));
+        Ok(PeerAddr { ip: *addr.ip(), tunnel_port: addr.port() })
     }
 
     fn remove_peer(&mut self, slot: u8) {
         if let Some(p) = self.peers.remove(&slot) {
             p.stop.store(true, Ordering::Release);
             if let Ok(mut a) = self.inner.aliases.lock() {
-                a.retain(|(s, _), _| *s != slot);
+                a.remove(&slot);
             }
-            for t in p.threads {
-                // Bounded by the alias sockets' read timeout; the threads never panic (panic = abort).
-                let _joined = t.join();
-            }
+            // Bounded by the alias socket's read timeout; the thread never panics (panic = abort).
+            let _joined = p.thread.join();
             self.inner.log.info(format!("relay slot {slot} of game {} released", self.inner.game.0));
         }
     }
@@ -682,40 +637,35 @@ mod tests {
         }
     }
 
-    /// Four consecutive free UDP ports on 127.0.0.1 for a `Ports` plan (aliases for slots 0 and 1).
+    /// Two consecutive free UDP ports on 127.0.0.1 for a `Ports` plan (aliases for slots 0 and 1).
     fn free_base() -> u16 {
         loop {
             let base = UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
             if base > 65000 {
                 continue;
             }
-            if (0..4).all(|i| UdpSocket::bind(("127.0.0.1", base + i)).is_ok()) {
+            if (0..2).all(|i| UdpSocket::bind(("127.0.0.1", base + i)).is_ok()) {
                 return base;
             }
         }
     }
 
-    /// A fake game: its tunnel and voice sockets.
+    /// A fake game: its tunnel socket.
     struct FakeGame {
         tunnel: UdpSocket,
-        voice: UdpSocket,
     }
 
     impl FakeGame {
         fn new() -> Self {
-            let s = || {
-                let u = UdpSocket::bind("127.0.0.1:0").unwrap();
-                u.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
-                u
-            };
-            FakeGame { tunnel: s(), voice: s() }
+            let tunnel = UdpSocket::bind("127.0.0.1:0").unwrap();
+            tunnel.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
+            FakeGame { tunnel }
         }
-        fn endpoints(&self) -> GameEndpoints {
-            let v4 = |u: &UdpSocket| match u.local_addr().unwrap() {
+        fn tunnel_addr(&self) -> SocketAddrV4 {
+            match self.tunnel.local_addr().unwrap() {
                 SocketAddr::V4(a) => a,
                 SocketAddr::V6(_) => unreachable!("bound to 127.0.0.1"),
-            };
-            GameEndpoints { tunnel: v4(&self.tunnel), voice: v4(&self.voice) }
+            }
         }
     }
 
@@ -723,7 +673,6 @@ mod tests {
         ShimSettings {
             plan: AliasPlan::Ports { ip: Ipv4Addr::LOCALHOST, base_port },
             game_ip: Ipv4Addr::LOCALHOST,
-            game_voice_port: GAME_VOICE_PORT,
             mtu: 1200,
             handshake_timeout: Duration::from_secs(5),
             poll: Duration::from_millis(20),
@@ -746,14 +695,14 @@ mod tests {
     }
 
     #[test]
-    fn two_shims_carry_tunnel_and_voice_through_the_real_relay() {
+    fn two_shims_carry_tunnel_datagrams_through_the_real_relay() {
         let srv = TestServer::start();
         let g = game(&srv, "relay1");
         let (log, _) = capture::logger();
         let (host_game, joiner_game) = (FakeGame::new(), FakeGame::new());
         let (hb, jb) = (free_base(), free_base());
-        let mut host = RelayShim::start(g.created.game_id, &g.created.relay, host_game.endpoints(), settings(hb), log.clone()).unwrap();
-        let mut joiner = RelayShim::start(g.accepted.game_id, &g.accepted.relay, joiner_game.endpoints(), settings(jb), log).unwrap();
+        let mut host = RelayShim::start(g.created.game_id, &g.created.relay, host_game.tunnel_addr(), settings(hb), log.clone()).unwrap();
+        let mut joiner = RelayShim::start(g.accepted.game_id, &g.accepted.relay, joiner_game.tunnel_addr(), settings(jb), log).unwrap();
         let joiner_slot = g.accepted.relay.local_slot;
         let host_slot = g.accepted.host_slot;
         // What the Theater adapter would advertise: EGRQ IP/PORT on the host, EGEG I/P on the joiner.
@@ -763,19 +712,13 @@ mod tests {
         assert!(host.add_peer(g.created.relay.local_slot).unwrap_err().contains("own slot"));
 
         let host_alias_tunnel = SocketAddrV4::new(joiner_seen_by_host.ip, joiner_seen_by_host.tunnel_port);
-        let host_alias_voice = settings(hb).plan.alias(joiner_slot, Channel::Voice).unwrap();
         let joiner_alias_tunnel = SocketAddrV4::new(host_seen_by_joiner.ip, host_seen_by_joiner.tunnel_port);
-        let joiner_alias_voice = settings(jb).plan.alias(host_slot, Channel::Voice).unwrap();
 
         // Tunnel host → joiner: arrives from the joiner's alias for the host (what the joiner's EGEG named).
         let src = deliver(&host_game.tunnel, host_alias_tunnel, &joiner_game.tunnel, b"tunnel from host");
         assert_eq!(src, SocketAddr::V4(joiner_alias_tunnel));
         let src = deliver(&joiner_game.tunnel, joiner_alias_tunnel, &host_game.tunnel, b"tunnel from joiner");
         assert_eq!(src, SocketAddr::V4(host_alias_tunnel));
-        let src = deliver(&host_game.voice, host_alias_voice, &joiner_game.voice, b"voice from host");
-        assert_eq!(src, SocketAddr::V4(joiner_alias_voice));
-        let src = deliver(&joiner_game.voice, joiner_alias_voice, &host_game.voice, b"voice from joiner");
-        assert_eq!(src, SocketAddr::V4(host_alias_voice));
         assert_eq!(host.state(), RelayState::Up);
         assert_eq!(joiner.state(), RelayState::Up);
 
@@ -787,6 +730,29 @@ mod tests {
     }
 
     #[test]
+    fn a_voice_datagram_from_a_peer_fails_the_session() {
+        // A peer whose client still forwards in-game voice sends Data{.., Voice}; this client carries none.
+        let srv = TestServer::start();
+        let g = game(&srv, "relay4");
+        let (log, _) = capture::logger();
+        let (host_game, joiner_game) = (FakeGame::new(), FakeGame::new());
+        let mut host = RelayShim::start(g.created.game_id, &g.created.relay, host_game.tunnel_addr(), settings(free_base()), log.clone()).unwrap();
+        let mut joiner = RelayShim::start(g.accepted.game_id, &g.accepted.relay, joiner_game.tunnel_addr(), settings(free_base()), log).unwrap();
+        let to_joiner = host.add_peer(g.accepted.relay.local_slot).unwrap();
+        joiner.add_peer(g.accepted.host_slot).unwrap();
+        // Both associations are up once a tunnel datagram has crossed.
+        deliver(&host_game.tunnel, SocketAddrV4::new(to_joiner.ip, to_joiner.tunnel_port), &joiner_game.tunnel, b"up");
+        {
+            let mut session = joiner.inner.session.lock().unwrap();
+            let voice = Datagram::Data { slot: g.accepted.host_slot, channel: Channel::Voice, payload: b"voice" };
+            session.as_mut().unwrap().write(&voice).unwrap();
+        }
+        let why = wait("the host to fail on the voice datagram", || failed(&host));
+        assert!(why.contains(&format!("relay slot {} sent a voice datagram (5 bytes)", g.accepted.relay.local_slot)), "{why}");
+        assert!(why.contains("still forwards in-game voice"), "{why}");
+    }
+
+    #[test]
     fn keepalives_hold_a_quiet_association_open() {
         // Relay idle timeout 2 s → keepalive every 666 ms; 5 s of game silence must not end it.
         let srv = TestServer::start_with_relay_idle(2);
@@ -794,8 +760,8 @@ mod tests {
         let (log, _) = capture::logger();
         let (host_game, joiner_game) = (FakeGame::new(), FakeGame::new());
         let (hb, jb) = (free_base(), free_base());
-        let mut host = RelayShim::start(g.created.game_id, &g.created.relay, host_game.endpoints(), settings(hb), log.clone()).unwrap();
-        let mut joiner = RelayShim::start(g.accepted.game_id, &g.accepted.relay, joiner_game.endpoints(), settings(jb), log).unwrap();
+        let mut host = RelayShim::start(g.created.game_id, &g.created.relay, host_game.tunnel_addr(), settings(hb), log.clone()).unwrap();
+        let mut joiner = RelayShim::start(g.accepted.game_id, &g.accepted.relay, joiner_game.tunnel_addr(), settings(jb), log).unwrap();
         let to_joiner = host.add_peer(g.accepted.relay.local_slot).unwrap();
         joiner.add_peer(g.accepted.host_slot).unwrap();
         let to_joiner = SocketAddrV4::new(to_joiner.ip, to_joiner.tunnel_port);
@@ -813,7 +779,7 @@ mod tests {
         let (log, _) = capture::logger();
         let mut a = g.created.relay.clone();
         a.cert_sha256 = "00".repeat(32);
-        let shim = RelayShim::start(g.created.game_id, &a, FakeGame::new().endpoints(), settings(free_base()), log).unwrap();
+        let shim = RelayShim::start(g.created.game_id, &a, FakeGame::new().tunnel_addr(), settings(free_base()), log).unwrap();
         let why = wait("the pin check to fail", || failed(&shim));
         assert!(why.contains(&format!("does not match the pinned {}", "00".repeat(32))), "{why}");
     }
@@ -831,26 +797,26 @@ mod tests {
         };
         let mut s = settings(free_base());
         s.handshake_timeout = Duration::from_millis(500);
-        let shim = RelayShim::start(GameId(1), &a, FakeGame::new().endpoints(), s, log.clone()).unwrap();
+        let shim = RelayShim::start(GameId(1), &a, FakeGame::new().tunnel_addr(), s, log.clone()).unwrap();
         let why = wait("the handshake to fail", || failed(&shim));
         assert!(why.contains("unreachable") || why.contains("did not finish within 500 ms"), "{why}");
 
         a.cert_sha256 = "zz".into();
-        assert!(RelayShim::start(GameId(1), &a, FakeGame::new().endpoints(), s, log.clone()).err().unwrap().contains("not 64 hex"));
+        assert!(RelayShim::start(GameId(1), &a, FakeGame::new().tunnel_addr(), s, log.clone()).err().unwrap().contains("not 64 hex"));
         a.cert_sha256 = "ab".repeat(32);
         a.idle_timeout_secs = 0;
-        assert!(RelayShim::start(GameId(1), &a, FakeGame::new().endpoints(), s, log.clone()).err().unwrap().contains("idle_timeout_secs is 0"));
+        assert!(RelayShim::start(GameId(1), &a, FakeGame::new().tunnel_addr(), s, log.clone()).err().unwrap().contains("idle_timeout_secs is 0"));
         a.idle_timeout_secs = 30;
         s.plan = AliasPlan::Loopback { base: Ipv4Addr::new(127, 0, 0, 2), tunnel_port: 10000 };
-        let ep = GameEndpoints { tunnel: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 10000), voice: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 55123) };
-        assert!(RelayShim::start(GameId(1), &a, ep, s, log).err().unwrap().contains("equals the game's own tunnel port"));
+        let game_tunnel = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 10000);
+        assert!(RelayShim::start(GameId(1), &a, game_tunnel, s, log).err().unwrap().contains("equals the game's own tunnel port"));
     }
 
     #[test]
     fn production_alias_plan() {
         let p = AliasPlan::Loopback { base: Ipv4Addr::new(127, 0, 0, 2), tunnel_port: 10010 };
-        assert_eq!(p.alias(0, Channel::Tunnel).unwrap(), "127.0.0.2:10010".parse().unwrap());
-        assert_eq!(p.alias(1, Channel::Voice).unwrap(), "127.0.0.3:55123".parse().unwrap());
-        assert!(p.alias(254, Channel::Tunnel).unwrap_err().contains("overflows"));
+        assert_eq!(p.alias(0).unwrap(), "127.0.0.2:10010".parse().unwrap());
+        assert_eq!(p.alias(1).unwrap(), "127.0.0.3:10010".parse().unwrap());
+        assert!(p.alias(254).unwrap_err().contains("overflows"));
     }
 }
