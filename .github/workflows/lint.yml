@@ -11,7 +11,7 @@ on:
 # the release asset, which is the same thing you would be copying by hand — so pinning it here would
 # add a second place to get out of date without adding any assurance.
 env:
-  QM_VERSION: v0.15.3
+  QM_VERSION: v0.17.0
 
 jobs:
   lint:
