@@ -15,7 +15,7 @@ load:
     # The ASI imports m2-sdk.dll: its hooks go through the SDK's single MinHook instance, and the `Mp` Lua
     # namespace through the SDK's Lua host. The m2-sdk Shipment places that DLL in the game root; without it
     # Windows refuses to load the ASI at all.
-    - { shipment: m2-sdk, version: "^0.5" }
+    - { shipment: m2-sdk, version: ">=0.5.0" }
 
 contributions:
   # The client ASI (built from client/ by client/scripts/build_asi.sh). It locates the ProtoSSL entry
