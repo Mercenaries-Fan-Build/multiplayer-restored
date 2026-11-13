@@ -53,8 +53,8 @@ use mercs2_formats::mod_runtime as rt;
 use crate::worker::{RestApi, Worker};
 
 const TITLE: &str = "multiplayer_restored";
-/// The m2-sdk.dll release this ASI is built against (manifest.yaml requires `^0.5`).
-const SDK_BUILT: &str = "0.5.0";
+/// The m2-sdk.dll release this ASI is built against (manifest.yaml requires `>=0.6.0`).
+const SDK_BUILT: &str = "0.6.0";
 /// How often the start-up thread re-scans `.text` while waiting for SecuROM to decrypt it.
 const SCAN_INTERVAL: Duration = Duration::from_millis(250);
 
