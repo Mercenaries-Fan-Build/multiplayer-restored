@@ -31,7 +31,7 @@ Start the game and stay on the main menu.
 - The m2-sdk Shipment is installed: `m2-sdk.dll` is in the game root. Without it the ASI is not loaded at all
   and `pmc_blackbox.log` shows `[FAILED] multiplayer_restored.asi`.
 - Log shows, in this order (each line's timestamp shows how long the step before it took):
-  1. `m2-sdk.dll 0.4.x (built against 0.4.0)` (`win/mod.rs:346`);
+  1. `m2-sdk.dll 0.6.x (built against 0.6.0)` (`win/mod.rs:346`);
   2. `signature <Fn> -> 0x…` for all eight ProtoSSL functions (`:351`), then `build .text sha256 …` (`:353`),
      then `signature GVInitialize -> 0x…` and `signature GVStartup -> 0x…` (`:356`);
   3. `signature OnlineAccountClear -> 0x… (account name 0x…, password 0x…)` (`lua/win.rs:106`), then `Lua
