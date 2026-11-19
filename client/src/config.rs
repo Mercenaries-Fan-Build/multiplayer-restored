@@ -54,6 +54,7 @@
 use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 
+use mercs2_https::BaseUrl;
 use thiserror::Error;
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -72,48 +73,6 @@ pub enum ConfigError {
     Missing { section: &'static str, key: &'static str },
     #[error("[{section}] {key}: {msg}")]
     Invalid { section: &'static str, key: &'static str, msg: String },
-}
-
-/// `https://host[:port][/prefix]`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BaseUrl {
-    pub host: String,
-    pub port: u16,
-    /// Path prefix without a trailing slash; empty for none.
-    pub prefix: String,
-}
-
-impl BaseUrl {
-    pub fn parse(s: &str) -> Result<Self, String> {
-        let rest = s.strip_prefix("https://").ok_or("must start with https://")?;
-        if rest.contains(['?', '#']) {
-            return Err("must not contain a query or fragment".into());
-        }
-        let (authority, path) = match rest.find('/') {
-            Some(i) => (&rest[..i], &rest[i..]),
-            None => (rest, ""),
-        };
-        if authority.contains('@') {
-            return Err("must not contain user info".into());
-        }
-        let (host, port) = match authority.rsplit_once(':') {
-            Some((h, p)) => (h, p.parse::<u16>().map_err(|_| format!("port {p:?} is not a number 1-65535"))?),
-            None => (authority, 443),
-        };
-        if port == 0 {
-            return Err("port 0 is invalid".into());
-        }
-        if host.is_empty() || !host.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-') {
-            return Err(format!("host {host:?} must be a DNS name or IPv4 address"));
-        }
-        let prefix = path.trim_end_matches('/').to_owned();
-        Ok(BaseUrl { host: host.to_ascii_lowercase(), port, prefix })
-    }
-
-    /// The request target for an API route such as `/v1/sessions`.
-    pub fn path(&self, route: &str) -> String {
-        format!("{}{route}", self.prefix)
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
