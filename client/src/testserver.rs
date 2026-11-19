@@ -20,9 +20,9 @@ use openssl::x509::{X509, X509NameBuilder};
 use mercs2_mp_api::ApiError;
 use mercs2_mp_api::ws::{Push, Request, Response};
 
-use crate::config::BaseUrl;
+use mercs2_https::{BaseUrl, HttpsClient};
+
 use crate::lobby::{Lobby, LobbyEvent};
-use crate::http::HttpsClient;
 use crate::log::{Logger, capture};
 use crate::session::LoggedIn;
 use crate::worker::{BackendFailure, BackendReply, BackendRequest, RestApi};
@@ -140,7 +140,7 @@ impl TestServer {
     pub fn ws_settings(&self) -> WsSettings {
         WsSettings {
             base: self.base(),
-            connector: crate::tls::connector(&self.https_ca_pem).unwrap(),
+            connector: mercs2_https::tls::connector(&self.https_ca_pem).unwrap(),
             connect_timeout: Duration::from_secs(5),
             io_timeout: Duration::from_secs(5),
             poll_interval: Duration::from_millis(2),
@@ -149,12 +149,16 @@ impl TestServer {
     }
 
     fn rest(&self) -> RestApi {
-        RestApi::new(HttpsClient::new(
-            crate::tls::connector(&self.https_ca_pem).unwrap(),
-            self.base(),
-            Duration::from_secs(5),
-            Duration::from_secs(5),
-        ))
+        RestApi::new(
+            HttpsClient::new(
+                mercs2_https::tls::connector(&self.https_ca_pem).unwrap(),
+                self.base(),
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+                &crate::user_agent(),
+            )
+            .unwrap(),
+        )
     }
 
     /// Create the account `name` (password `password-<name>`) and log in through the REST client.
