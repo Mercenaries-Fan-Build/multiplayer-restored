@@ -57,6 +57,8 @@ fn self_signed(dir: &Path, name: &str) -> (PathBuf, PathBuf) {
 pub struct TestServer {
     pub https: SocketAddr,
     pub https_ca_pem: Vec<u8>,
+    /// The server's SQLite database, for tests that change what the server holds (a leaderboard ban).
+    pub db_path: PathBuf,
     log: Logger,
 }
 
@@ -113,6 +115,7 @@ impl TestServer {
             }),
         };
         cfg.validate().unwrap();
+        let db_path = cfg.database.path.clone();
         let https_ca_pem = std::fs::read(&https_cert).unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -126,7 +129,7 @@ impl TestServer {
         });
         let https = rx.recv_timeout(Duration::from_secs(30)).unwrap();
         let (log, _text) = capture::logger();
-        TestServer { https, https_ca_pem, log }
+        TestServer { https, https_ca_pem, db_path, log }
     }
 
     pub fn base(&self) -> BaseUrl {
@@ -149,21 +152,24 @@ impl TestServer {
         }
     }
 
-    fn rest(&self) -> RestApi {
-        RestApi::new(
+    /// The REST client the ASI builds: one `HttpsClient` for accounts and sessions, one with the leaderboards'
+    /// deadline.
+    pub fn rest(&self) -> RestApi {
+        let client = |request_timeout| {
             HttpsClient::new(
                 mercs2_https::tls::connector(&self.https_ca_pem).unwrap(),
                 self.base(),
                 mercs2_https::Limits {
                     connect_timeout: Duration::from_secs(5),
                     io_timeout: Duration::from_secs(5),
-                    request_timeout: Duration::from_secs(10),
+                    request_timeout,
                     max_body: crate::worker::MAX_RESPONSE_BODY,
                 },
                 &crate::user_agent(),
             )
-            .unwrap(),
-        )
+            .unwrap()
+        };
+        RestApi::new(client(Duration::from_secs(10)), client(crate::leaderboard::TIMEOUT))
     }
 
     /// Create the account `name` (password `password-<name>`) and log in through the REST client.
