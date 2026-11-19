@@ -6,8 +6,13 @@ edition = "2024"
 license = "MIT"
 publish = false
 
+[features]
+# `mercs2_https::testing`: the throwaway CA and local TLS server for tests. Consumers enable it from their
+# `[dev-dependencies]` only, so it is never part of a release build.
+testing = []
+
 [dependencies]
-openssl = { version = "0.10", features = ["vendored"] }
+openssl ={ version = "0.10", features = ["vendored"] }
 # Pins the vendored OpenSSL to the 3.x series (openssl-src 300.x builds OpenSSL 3.x).
 openssl-src = "300"
 httparse = "1"
