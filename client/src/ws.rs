@@ -323,8 +323,9 @@ fn inbound(shared: &Shared, log: &Logger, msg: Message) -> Result<(), String> {
         Message::Ping(_) | Message::Pong(_) => return Ok(()),
         Message::Binary(_) | Message::Frame(_) => return Err("the server sent a non-text frame".into()),
     };
-    let frame: ServerFrame =
-        serde_json::from_str(text.as_str()).map_err(|e| format!("server frame is not mercs2_mp_api v1 JSON ({e}): {}", text.as_str()))?;
+    // The frame's size only, never its text: a reply or push can carry the relay session token and the keys.
+    let frame: ServerFrame = serde_json::from_str(text.as_str())
+        .map_err(|e| format!("server frame ({} bytes) is not mercs2_mp_api v1 JSON ({e})", text.as_str().len()))?;
     let (id, result) = match frame {
         ServerFrame::Reply { id, response } => (id, Ok(response)),
         ServerFrame::Error { id, error } => (id, Err(error)),
@@ -332,7 +333,7 @@ fn inbound(shared: &Shared, log: &Logger, msg: Message) -> Result<(), String> {
             let sink = shared.pushes.lock().map_err(|_| "lobby push lock poisoned".to_string())?;
             let delivered = sink.as_ref().is_some_and(|tx| tx.send(push.clone()).is_ok());
             if !delivered {
-                log.error(format!("lobby push with no Theater connection to deliver it to: {push:?}"));
+                log.error(format!("lobby push {} with no Theater connection to deliver it to", crate::lobby::push_name(&push)));
             }
             return Ok(());
         }
