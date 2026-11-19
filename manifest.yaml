@@ -13,9 +13,10 @@ shipment:
 load:
   requires:
     # The ASI imports m2-sdk.dll: its hooks go through the SDK's single MinHook instance, and the `Mp` Lua
-    # namespace through the SDK's Lua host. The m2-sdk Shipment places that DLL in the game root; without it
-    # Windows refuses to load the ASI at all.
-    - { shipment: m2-sdk, version: ">=0.6.0" }
+    # namespace and the leaderboard functions through the SDK's Lua host. The m2-sdk Shipment places that DLL in
+    # the game root; without it Windows refuses to load the ASI at all. 0.6.2 adds the Lua function references
+    # the leaderboard callbacks are kept and called by.
+    - { shipment: m2-sdk, version: ">=0.6.2" }
 
 contributions:
   # The client ASI (built from client/ by client/scripts/build_asi.sh). It locates the ProtoSSL entry
@@ -23,11 +24,19 @@ contributions:
   # other count stops the game with a message), so the addresses below are the ones those signatures resolve
   # to in mercs2_nodrm_v3.exe and mercs2_unpacked.exe, and in the retail v1.1 dump — verified by the crate's
   # signature tests. ProtoSSLCreate is resolved as part of the build check but not detoured. GVInitialize and
-  # GVStartup are detoured to do nothing, so in-game voice never starts (client/src/voice.rs).
+  # GVStartup are detoured to do nothing, so in-game voice never starts (client/src/voice.rs). It also adds the
+  # leaderboard functions PC v1.1 never registered to the engine's own Net and Pg tables through m2-sdk.dll's
+  # Lua host (client/src/leaderboard.rs, net.rs, cheats.rs): the boards live on the multiplayer server, and the
+  # cheats pair gates the push, as PS3 v1.03 does.
   - kind: native_hook
     target: retail
     plugin: src/multiplayer_restored.asi
     touches:
+      - Net.GetUserName
+      - Net.LeaderboardGetScore
+      - Net.LeaderboardPushScore
+      - Pg.SetCheatsUsed
+      - Pg.WereCheatsUsed
       - ProtoSSLConnect
       - ProtoSSLDisconnect
       - ProtoSSLDestroy
