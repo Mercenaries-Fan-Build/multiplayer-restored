@@ -12,21 +12,28 @@
 //! * services: [`fesl`] (+ [`errors`] for ApiError → FESL error codes, [`curtime`]) and [`theater`];
 //! * backend: `mercs2_https` (REST client and TLS policy), [`worker`], [`session`]; after login the lobby
 //!   WebSocket ([`lobby`], [`ws`]) and, per game, the DTLS relay shim ([`relay`]) that carries gameplay UDP;
-//! * for other ASIs: [`session_export`], the logged-in session behind the `mr_session_v1` C export;
-//! * runtime: [`config`], [`log`], the `Mp` Lua namespace ([`lua`]), and the Windows-only hook layer in
+//! * for other ASIs: [`session_export`], who is signed in, behind the `mr_session_v1` C export (never the token);
+//! * the game's leaderboards and the functions PC never registered that go with them: [`leaderboard`]
+//!   (`Net.LeaderboardGetScore`, `Net.LeaderboardPushScore`), [`net`] (`Net.GetUserName`) and [`cheats`]
+//!   (`Pg.SetCheatsUsed`, `Pg.WereCheatsUsed`); [`registry`] lists every Lua name the ASI adds;
+//! * runtime: [`config`], [`log`], the Lua namespaces ([`lua`]), and the Windows-only hook layer in
 //!   `win`. Every detour and the Lua host go through m2-sdk.dll, the runtime every mod shares
 //!   (`mercs2_formats::mod_runtime`).
 
 pub mod account;
 pub mod build_id;
+pub mod cheats;
 pub mod config;
 pub mod curtime;
 pub mod errors;
 pub mod fesl;
+pub mod leaderboard;
 pub mod lobby;
 pub mod log;
 pub mod lua;
+pub mod net;
 pub mod protossl;
+pub mod registry;
 pub mod relay;
 pub mod room_key;
 pub mod session;
