@@ -481,9 +481,7 @@ fn failure(f: BackendFailure) -> String {
 pub fn finish(job: &Job, outcome: WorkerOutcome) -> Done {
     let result = match outcome {
         Ok(BackendReply::LeaderboardEntry(e)) => entry(job.kind, e),
-        // Only the variant's name: a `SessionCreated` holds a token, which never reaches a log line.
-        Ok(BackendReply::AccountCreated(_)) => Err("the worker answered a leaderboard request with AccountCreated".into()),
-        Ok(BackendReply::SessionCreated(_)) => Err("the worker answered a leaderboard request with SessionCreated".into()),
+        Ok(other) => Err(format!("the worker answered a leaderboard request with {}", other.name())),
         Err(f) => Err(failure(f)),
     };
     Done { kind: job.kind, g: job.g, cycle: job.cycle, board: job.board.clone(), sent: job.sent, result }
