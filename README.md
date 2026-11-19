@@ -28,6 +28,11 @@ pushed and read as the player who is logged in online, and a save in which cheat
 Offline, or when the server refuses, the game gets no answer, as on PS3. The server's public board pages are
 what sites such as mercs.ink show.
 
+This release and the Blow It Up Again update that moved these functions here ship together. That update
+requires m2-sdk `>=0.6.2`, no longer registers the five functions and no longer reads `mr_session_v1`. An
+older Blow It Up Again requires m2-sdk `>=0.7.0`, registers the same five names (whichever plugin registers
+last wins) and reads the old 836-byte `MrSessionV1`, which this release refuses.
+
 ## Setup
 
 1. Install the Shipment with the Modkit or `qm`.
