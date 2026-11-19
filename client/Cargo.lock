@@ -1368,6 +1368,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mercs2_https"
+version = "0.1.0"
+dependencies = [
+ "httparse",
+ "openssl",
+ "openssl-src",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
 name = "mercs2_mp_api"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1454,17 +1465,16 @@ dependencies = [
 
 [[package]]
 name = "multiplayer_restored"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "base64 0.22.1",
  "foreign-types",
- "httparse",
  "mercs2_formats",
+ "mercs2_https",
  "mercs2_mp_api",
  "mercs2_mp_server",
  "mercs2_plasma_proto",
  "openssl",
- "openssl-src",
  "openssl-sys",
  "serde",
  "serde_json",
