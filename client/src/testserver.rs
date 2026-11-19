@@ -153,8 +153,12 @@ impl TestServer {
             HttpsClient::new(
                 mercs2_https::tls::connector(&self.https_ca_pem).unwrap(),
                 self.base(),
-                Duration::from_secs(5),
-                Duration::from_secs(5),
+                mercs2_https::Limits {
+                    connect_timeout: Duration::from_secs(5),
+                    io_timeout: Duration::from_secs(5),
+                    request_timeout: Duration::from_secs(10),
+                    max_body: crate::worker::MAX_RESPONSE_BODY,
+                },
                 &crate::user_agent(),
             )
             .unwrap(),
