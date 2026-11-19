@@ -63,7 +63,9 @@ It hands another mod the multiplayer-server session the player signed in with th
   - An internal error. Handled like a value that does not fit.
 
 The session lasts until `Mp.Logout` or the next Login. The token expires when the server says it does; the
-server answers an expired or revoked token with HTTP 401.
+server answers an expired or revoked token with HTTP 401. `Mp.Logout` ends the plugin's own use of the token
+but does not revoke it (the server's API has no route for that), so a copy a mod took earlier stays valid
+until its expiry.
 
 The function is thread-safe and never touches the network. A mod resolves it when it needs it, not in its own
 `DllMain`, because the plugin load order is not guaranteed:
@@ -82,15 +84,21 @@ manifest. A later field means a new `MrSessionV2` and `mr_session_v2`; V1 never 
 a server under the same trust policy:
 
 - OpenSSL 3, statically linked;
-- TLS 1.2 or later;
+- TLS 1.2 or later, with forward-secret AEAD cipher suites only;
 - certificate chains verified against only the embedded Mozilla CA bundle (`client/mercs2_https/ca/`), with
-  hostname verification;
-- one blocking request per connection, with connect and I/O timeouts, run from a worker thread.
+  hostname verification against the certificate's subjectAltName (never its subject CN);
+- one blocking request per connection, run from a worker thread, within the caller's `Limits`: connect, I/O
+  and whole-request timeouts, and a response body cap sized from the server's API.
 
-Depend on it by this repository's release tag:
+Depend on it by this repository's release tag; its test fixtures (`mercs2_https::testing`) are behind the
+`testing` feature, for `[dev-dependencies]` only:
 
 ```toml
+[dependencies]
 mercs2_https = { git = "https://github.com/Mercenaries-Fan-Build/multiplayer-restored", tag = "v0.6.0" }
+
+[dev-dependencies]
+mercs2_https = { git = "https://github.com/Mercenaries-Fan-Build/multiplayer-restored", tag = "v0.6.0", features = ["testing"] }
 ```
 
 ## Running a server
