@@ -143,6 +143,7 @@ impl TestServer {
             connector: mercs2_https::tls::connector(&self.https_ca_pem).unwrap(),
             connect_timeout: Duration::from_secs(5),
             io_timeout: Duration::from_secs(5),
+            open_timeout: Duration::from_secs(10),
             poll_interval: Duration::from_millis(2),
             idle_timeout: Duration::from_secs(20),
         }
