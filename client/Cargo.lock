@@ -277,6 +277,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "bytemuck"
+version = "1.25.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "95832e849adfb21180ccb6826a99da14e5d266ae5c2e668e1602cf234f153797"
+
+[[package]]
 name = "byteorder"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -378,7 +384,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "117725a109d387c937a1533ce01b450cbde6b88abceea8473c4d7a85853cda3c"
 dependencies = [
  "lazy_static",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1352,15 +1358,16 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "mercs2_formats"
-version = "6.0.0"
+version = "6.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eebc96f9e66c92e6e950792bf03ae5cb270b7a06ade4e0bb3d2f06ae38850979"
+checksum = "df4750fc9fc8da39067ce739aba85daa63559d58009ffa5c4792ce1e7e27022e"
 dependencies = [
  "aes",
  "cmac",
  "flate2",
  "gltf",
  "loadprobe",
+ "nanomp3",
  "serde",
  "serde_json",
  "sha2",
@@ -1368,10 +1375,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "mercs2_mp_api"
+name = "mercs2_https"
 version = "0.1.0"
+dependencies = [
+ "httparse",
+ "openssl",
+ "openssl-src",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
+name = "mercs2_mp_api"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba1b7dcff09bff7b1e0c17ebe650c2af9356d2428e83fb38dc432fbbd4b12d7c"
+checksum = "2ad6bad5cf78eb94ad502517f69d90a056708e01816ab401586d3547191fc6b9"
 dependencies = [
  "serde",
  "serde_json",
@@ -1380,9 +1398,9 @@ dependencies = [
 
 [[package]]
 name = "mercs2_mp_server"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d5bdc1ed42e5a4baf2ab2d4a1bbbd1bdf291ec98d9954b86804f1ebfc2e92b6d"
+checksum = "dacfae20291ef668b64f535ea8254fa54e656a89b49f0933277bca8d92f3f74f"
 dependencies = [
  "argon2",
  "axum",
@@ -1454,17 +1472,16 @@ dependencies = [
 
 [[package]]
 name = "multiplayer_restored"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "base64 0.22.1",
  "foreign-types",
- "httparse",
  "mercs2_formats",
+ "mercs2_https",
  "mercs2_mp_api",
  "mercs2_mp_server",
  "mercs2_plasma_proto",
  "openssl",
- "openssl-src",
  "openssl-sys",
  "serde",
  "serde_json",
@@ -1474,6 +1491,24 @@ dependencies = [
  "tokio",
  "tungstenite",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "nanomp3"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "acd9a8d0592a17ee5211aae2f976e6dc2f6846135d1f49665b3f19a7afd23435"
+dependencies = [
+ "nanomp3-core",
+]
+
+[[package]]
+name = "nanomp3-core"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "63fa2238e662d3d3c1a71168b3278f23422cf9bf76f6943ee6b1c2581d74eb5c"
+dependencies = [
+ "wide",
 ]
 
 [[package]]
@@ -2039,6 +2074,15 @@ name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
+
+[[package]]
+name = "safe_arch"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "42c6efa15875e6ecb39ca61fb0b0c1a40b84fac5a5ffe71eef7d1000c8eb3f5f"
+dependencies = [
+ "bytemuck",
+]
 
 [[package]]
 name = "same-file"
@@ -3043,6 +3087,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "wide"
+version = "1.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d920ac99c3c8edce110cb8d07dbb324d6d026011dce85b1e9355b70f0adacc4f"
+dependencies = [
+ "bytemuck",
+ "safe_arch",
+]
+
+[[package]]
 name = "winapi-util"
 version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3071,15 +3125,6 @@ name = "windows-sys"
 version = "0.52.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "282be5f36a8ce781fad8c8ae18fa3f9beff57ec1b52cb3de0789201425d9a33d"
-dependencies = [
- "windows-targets 0.52.6",
-]
-
-[[package]]
-name = "windows-sys"
-version = "0.59.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e38bc4d79ed67fd075bcc251a1c39b32a1776bbe92e5bef1f0bf1f8c531853b"
 dependencies = [
  "windows-targets 0.52.6",
 ]

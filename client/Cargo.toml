@@ -1,29 +1,31 @@
 [package]
 name = "multiplayer_restored"
-version = "0.5.0"
+version = "0.6.0"
 description = "Mercenaries 2 multiplayer client ASI: terminates FESL/Theater locally and talks to the multiplayer server over HTTPS"
 edition = "2024"
 publish = false
 
-# Standalone package: its own workspace root.
+# Standalone package: its own workspace root. `mercs2_https` is the HTTPS client and trust policy shared with
+# other ASIs, which depend on it from this repository by tag.
 [workspace]
+members = ["mercs2_https"]
 
 [lib]
 crate-type = ["cdylib"]
 
 [dependencies]
 # m2-sdk.dll's bindings (mercs2_formats::mod_runtime), the PE reader and the signature scanner.
-mercs2_formats = "6.0"
+mercs2_formats = "6.0.3"
 mercs2_plasma_proto = "0.1.0"
-mercs2_mp_api = "0.1.0"
+mercs2_mp_api = "0.1.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 sha2 = "0.10"
-httparse = "1"
-openssl = { version = "0.10", features = ["vendored"] }
-# Pins the vendored OpenSSL to the 3.x series (openssl-src 300.x builds OpenSSL 3.x).
-openssl-src = "300"
+# REST client, TLS policy and the embedded CA bundle; it also vendors and pins OpenSSL 3, which the `openssl`
+# dependency below shares.
+mercs2_https = { path = "mercs2_https" }
+openssl = "0.10"
 # `SSL_ctrl(DTLS_CTRL_HANDLE_TIMEOUT)`: DTLS handshake retransmission over the relay shim's memory BIO
 # (the `openssl` crate has no wrapper for `DTLSv1_handle_timeout`).
 openssl-sys = "0.9"
@@ -53,7 +55,9 @@ codegen-units = 1
 
 [dev-dependencies]
 base64 = "0.22"
-# The real server, started in-process by the WebSocket / relay integration tests.
-mercs2_mp_server = "0.1.0"
+# `mercs2_https::testing` (test CA, one-shot TLS server) for this crate's tests only.
+mercs2_https = { path = "mercs2_https", features = ["testing"] }
+# The real server, started in-process by the WebSocket, relay and leaderboard integration tests.
+mercs2_mp_server = "0.1.1"
 tokio = { version = "1", features = ["full"] }
 tempfile = "3"

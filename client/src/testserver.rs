@@ -20,9 +20,9 @@ use openssl::x509::{X509, X509NameBuilder};
 use mercs2_mp_api::ApiError;
 use mercs2_mp_api::ws::{Push, Request, Response};
 
-use crate::config::BaseUrl;
+use mercs2_https::{BaseUrl, HttpsClient};
+
 use crate::lobby::{Lobby, LobbyEvent};
-use crate::http::HttpsClient;
 use crate::log::{Logger, capture};
 use crate::session::LoggedIn;
 use crate::worker::{BackendFailure, BackendReply, BackendRequest, RestApi};
@@ -57,6 +57,8 @@ fn self_signed(dir: &Path, name: &str) -> (PathBuf, PathBuf) {
 pub struct TestServer {
     pub https: SocketAddr,
     pub https_ca_pem: Vec<u8>,
+    /// The server's SQLite database, for tests that change what the server holds (a leaderboard ban).
+    pub db_path: PathBuf,
     log: Logger,
 }
 
@@ -113,6 +115,7 @@ impl TestServer {
             }),
         };
         cfg.validate().unwrap();
+        let db_path = cfg.database.path.clone();
         let https_ca_pem = std::fs::read(&https_cert).unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -126,7 +129,7 @@ impl TestServer {
         });
         let https = rx.recv_timeout(Duration::from_secs(30)).unwrap();
         let (log, _text) = capture::logger();
-        TestServer { https, https_ca_pem, log }
+        TestServer { https, https_ca_pem, db_path, log }
     }
 
     pub fn base(&self) -> BaseUrl {
@@ -140,21 +143,33 @@ impl TestServer {
     pub fn ws_settings(&self) -> WsSettings {
         WsSettings {
             base: self.base(),
-            connector: crate::tls::connector(&self.https_ca_pem).unwrap(),
+            connector: mercs2_https::tls::connector(&self.https_ca_pem).unwrap(),
             connect_timeout: Duration::from_secs(5),
             io_timeout: Duration::from_secs(5),
+            open_timeout: Duration::from_secs(10),
             poll_interval: Duration::from_millis(2),
             idle_timeout: Duration::from_secs(20),
         }
     }
 
-    fn rest(&self) -> RestApi {
-        RestApi::new(HttpsClient::new(
-            crate::tls::connector(&self.https_ca_pem).unwrap(),
-            self.base(),
-            Duration::from_secs(5),
-            Duration::from_secs(5),
-        ))
+    /// The REST client the ASI builds: one `HttpsClient` for accounts and sessions, one with the leaderboards'
+    /// deadline.
+    pub fn rest(&self) -> RestApi {
+        let client = |request_timeout| {
+            HttpsClient::new(
+                mercs2_https::tls::connector(&self.https_ca_pem).unwrap(),
+                self.base(),
+                mercs2_https::Limits {
+                    connect_timeout: Duration::from_secs(5),
+                    io_timeout: Duration::from_secs(5),
+                    request_timeout,
+                    max_body: crate::worker::MAX_RESPONSE_BODY,
+                },
+                &crate::user_agent(),
+            )
+            .unwrap()
+        };
+        RestApi::new(client(Duration::from_secs(10)), client(crate::leaderboard::TIMEOUT))
     }
 
     /// Create the account `name` (password `password-<name>`) and log in through the REST client.

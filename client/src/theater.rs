@@ -347,13 +347,14 @@ impl TheaterAdapter {
                         theater::CLIENT_REQUEST_ID
                     ));
                 }
-                // Raw dump of every id-0 frame, before it is handled.
+                // Raw dump of every id-0 frame, before it is handled (secret fields redacted).
+                let shown = crate::fesl::redacted_fields(&f.payload);
                 self.log.info(format!(
                     "Theater {} frame from the game with id 0x0: {} payload bytes, hex {}, text {:?}",
                     kind_name(f.kind),
                     f.payload.len(),
-                    crate::fesl::hex(&f.payload),
-                    String::from_utf8_lossy(&f.payload)
+                    crate::fesl::hex(&shown),
+                    String::from_utf8_lossy(&shown)
                 ));
                 // The game's answer to our keepalive push.
                 if f.kind == Kind::new(b"PING") && self.pings_unanswered > 0 {
@@ -779,7 +780,11 @@ impl TheaterAdapter {
     }
 
     fn complete(&mut self, id: u64, pend: Pend, result: Result<Response, ApiError>) -> R {
-        let unexpected = |what: &str, r: &Result<Response, ApiError>| format!("lobby #{id} ({what}): unexpected answer {r:?}");
+        // A reply's name only, never its fields: `GameCreated` carries the relay session token and the keys.
+        let unexpected = |what: &str, r: &Result<Response, ApiError>| match r {
+            Ok(resp) => format!("lobby #{id} ({what}): unexpected answer {}", crate::lobby::response_name(resp)),
+            Err(e) => format!("lobby #{id} ({what}): unexpected answer {e}"),
+        };
         match pend {
             Pend::Glst { tid, count } => {
                 let Ok(Response::Games(mut games)) = result else { return Err(unexpected("GLST", &result)) };

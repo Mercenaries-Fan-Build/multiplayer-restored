@@ -67,6 +67,36 @@ pub fn describe(req: &Request) -> String {
     }
 }
 
+/// A reply's variant name, for log lines. A reply is never formatted with `Debug` into a log: `GameCreated`
+/// carries the relay session token, the ProtoTunnel key and the game secret.
+pub fn response_name(r: &Response) -> &'static str {
+    match r {
+        Response::Pong => "Pong",
+        Response::Ok => "Ok",
+        Response::Games(_) => "Games",
+        Response::Game(_) => "Game",
+        Response::GameCreated(_) => "GameCreated",
+        Response::JoinPending { .. } => "JoinPending",
+        Response::Friends(_) => "Friends",
+        Response::Stats(_) => "Stats",
+        Response::Users(_) => "Users",
+    }
+}
+
+/// A push's variant name, for log lines: `JoinAccepted` carries the relay session token and the ProtoTunnel
+/// key.
+pub fn push_name(p: &Push) -> &'static str {
+    match p {
+        Push::JoinRequest { .. } => "JoinRequest",
+        Push::JoinAccepted(_) => "JoinAccepted",
+        Push::JoinDenied { .. } => "JoinDenied",
+        Push::PlayerLeft { .. } => "PlayerLeft",
+        Push::Kicked { .. } => "Kicked",
+        Push::GameRemoved { .. } => "GameRemoved",
+        Push::FriendsUpdated { .. } => "FriendsUpdated",
+    }
+}
+
 #[cfg(test)]
 pub mod fake {
     //! A scripted lobby for adapter tests: the test sees every request and decides every reply and push.

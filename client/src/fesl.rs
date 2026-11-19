@@ -179,6 +179,41 @@ pub(crate) fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
+/// Parts of a TagField key that name a secret the game sends (`docs/reverse_engineer/multiplayer_txn_catalogue.md`):
+/// FESL `acct` `password`, `newPassword`, `encryptedInfo`; Theater `CGAM` `PASSWORD`, `SECRET`, `EKEY`, `USER`
+/// `LKEY`; Messenger `AUTH` `PASS`, `LKEY`; `telemetryToken`. Compared case-insensitively, as a part of the
+/// key, so a key that only resembles one (`PASSING`) is redacted too.
+const SECRET_KEY_PARTS: [&str; 6] = ["pass", "encrypted", "secret", "token", "lkey", "ekey"];
+
+/// A TagField payload (`key=value` lines) for a log line: the value of every key naming a secret replaced by
+/// `<redacted N bytes>`. Everything else, line breaks and the trailing NUL included, is kept as it was.
+pub(crate) fn redacted_fields(payload: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(payload.len());
+    for (i, line) in payload.split(|&b| b == b'\n').enumerate() {
+        if i > 0 {
+            out.push(b'\n');
+        }
+        match line.iter().position(|&b| b == b'=') {
+            Some(eq) if is_secret_key(&line[..eq]) => {
+                let value = &line[eq + 1..];
+                let nul = value.ends_with(b"\0");
+                out.extend_from_slice(&line[..=eq]);
+                out.extend_from_slice(format!("<redacted {} bytes>", value.len() - usize::from(nul)).as_bytes());
+                if nul {
+                    out.push(0);
+                }
+            }
+            _ => out.extend_from_slice(line),
+        }
+    }
+    out
+}
+
+fn is_secret_key(key: &[u8]) -> bool {
+    let key = String::from_utf8_lossy(key).to_ascii_lowercase();
+    SECRET_KEY_PARTS.iter().any(|part| key.contains(part))
+}
+
 impl<B: Backend> FeslAdapter<B> {
     pub fn new(
         settings: Arc<FeslSettings>,
@@ -275,7 +310,10 @@ impl<B: Backend> FeslAdapter<B> {
                     }
                 }
                 LobbyEvent::Push(p) => {
-                    return Err(FeslFailure::Protocol(format!("lobby push on the FESL handle, which never subscribes: {p:?}")));
+                    return Err(FeslFailure::Protocol(format!(
+                        "lobby push {} on the FESL handle, which never subscribes",
+                        crate::lobby::push_name(&p)
+                    )));
                 }
             }
         }
@@ -423,7 +461,8 @@ impl<B: Backend> FeslAdapter<B> {
                 // The whole request goes to the log: for rank UpdateStats the meaning of `u.%d.s.%d.ut` comes
                 // from what the game sends (its builder FUN_0097fed0 is reached only through the rank
                 // object's vtable, so no static call site shows the values).
-                self.log.error(format!("{msg}; request: {:?}", String::from_utf8_lossy(payload).trim_end_matches('\0')));
+                let request = redacted_fields(payload);
+                self.log.error(format!("{msg}; request: {:?}", String::from_utf8_lossy(&request).trim_end_matches('\0')));
                 self.reply_error(kind, tid, &txn, &FeslError { code: GENERIC_ERROR_CODE, message: msg.clone() })?;
             }
         }
@@ -549,7 +588,7 @@ impl<B: Backend> FeslAdapter<B> {
                 self.log.info(format!("{what}: account {:?} created (user {})", a.username, a.user_id.0));
             }
             (_, Ok(other)) => {
-                return Err(FeslFailure::Protocol(format!("{what}: backend answered with the wrong reply type {other:?}")));
+                return Err(FeslFailure::Protocol(format!("{what}: backend answered with the wrong reply type {}", other.name())));
             }
             // The server answers an unknown name and a wrong password alike, so either way the stored name goes.
             (PendingKind::Login { username }, Err(BackendFailure::Api(e))) if e.code == ErrorCode::BadCredentials => {
@@ -669,7 +708,7 @@ impl<B: Backend> FeslAdapter<B> {
                 self.log.warn(format!("rank {txn} tid {}: server refused: {e}", g.tid));
                 self.reply_error(RANK, g.tid, txn, &map_api_error(&e))
             }
-            Ok(other) => Err(FeslFailure::Protocol(format!("stats.get answered with {other:?}"))),
+            Ok(other) => Err(FeslFailure::Protocol(format!("stats.get answered with {}", crate::lobby::response_name(&other)))),
         }
     }
 
@@ -718,7 +757,9 @@ impl<B: Backend> FeslAdapter<B> {
                 t.set_str("sessionState", "ERROR")?;
                 t.set_str("props.{reasonString}", e.to_string())?;
             }
-            Ok(other) => return Err(FeslFailure::Protocol(format!("games.list answered with {other:?}"))),
+            Ok(other) => {
+                return Err(FeslFailure::Protocol(format!("games.list answered with {}", crate::lobby::response_name(&other))));
+            }
         }
         self.reply(PNOW, 0, &t, "Status")
     }
@@ -1108,6 +1149,87 @@ mod tests {
             "{}",
             r.log.text()
         );
+    }
+
+    #[test]
+    fn secret_fields_are_redacted_and_everything_else_kept() {
+        let payload = b"TXN=UpdatePassword\npassword=old-s3cret\nnewPassword=\"new s3cret\"\nencryptedInfo=abc\n\
+            LKEY=k3y\nSECRET=x\nEKEY=e\ntelemetryToken=t\nname=Mattias\n\0";
+        let got = String::from_utf8(redacted_fields(payload)).unwrap();
+        assert_eq!(
+            got,
+            "TXN=UpdatePassword\npassword=<redacted 10 bytes>\nnewPassword=<redacted 12 bytes>\n\
+             encryptedInfo=<redacted 3 bytes>\nLKEY=<redacted 3 bytes>\nSECRET=<redacted 1 bytes>\nEKEY=<redacted 1 bytes>\n\
+             telemetryToken=<redacted 1 bytes>\nname=Mattias\n\0"
+        );
+        assert_eq!(redacted_fields(b"TXN=Ping\n\0"), b"TXN=Ping\n\0");
+        assert_eq!(redacted_fields(b"password=last\0"), b"password=<redacted 4 bytes>\0");
+    }
+
+    #[test]
+    fn an_unimplemented_txn_is_logged_without_its_passwords() {
+        let mut r = rig();
+        r.hello();
+        // UpdatePassword's builder (0x97daf0) sends password, newPassword, returnEncryptedInfo.
+        r.send(&req(b"acct", 5, "TXN=UpdatePassword\npassword=old-s3cret\nnewPassword=new-s3cret\nreturnEncryptedInfo=0\n"));
+        let log = r.log.text();
+        assert!(log.contains("acct UpdatePassword is not implemented"), "{log}");
+        assert!(log.contains("password=<redacted 10 bytes>") && log.contains("newPassword=<redacted 10 bytes>"), "{log}");
+        assert!(!log.contains("s3cret"), "a password reached the log: {log}");
+    }
+
+    #[test]
+    fn a_wrong_reply_type_names_the_variant_and_never_the_token() {
+        let mut r = rig();
+        r.hello();
+        r.send(&req(b"acct", 6, "TXN=AddAccount\nname=newbie\npassword=longenough\n"));
+        let job = r.a.backend.submitted[0].0;
+        r.a.backend.ready.push((
+            job,
+            Ok(BackendReply::SessionCreated(SessionCreated {
+                token: "s3cret-token".into(),
+                user_id: UserId(1),
+                display_name: "newbie".into(),
+                expires_at: 1,
+            })),
+        ));
+        let e = r.a.pump(r.now).unwrap_err().to_string();
+        assert!(e.contains("wrong reply type SessionCreated"), "{e}");
+        assert!(!e.contains("s3cret") && !r.log.text().contains("s3cret"), "{e}");
+    }
+
+    #[test]
+    fn an_unexpected_lobby_reply_names_the_variant_and_never_its_keys() {
+        use mercs2_mp_api::ws::{GameCreated, RelayAssignment, Response as Ws};
+        let mut r = rig();
+        logged_in(&mut r);
+        r.send(&req(
+            b"pnow",
+            3,
+            "TXN=Start\npartition.partition=/eagames/MERCS2\nversion=1\nplayers.[]=1\nplayers.0.ownerId=7\n\
+             players.0.ownerType=1\n",
+        ));
+        r.frames();
+        let (id, _) = r.provider.lobby.last();
+        let created = GameCreated {
+            game_id: mercs2_mp_api::GameId(5),
+            pid: 1,
+            ekey: "ekey-s3cret".into(),
+            secret: "game-s3cret".into(),
+            ugid: "u".into(),
+            relay: RelayAssignment {
+                host: "relay".into(),
+                port: 1,
+                cert_sha256: "00".into(),
+                session_token: "relay-s3cret".into(),
+                local_slot: 0,
+                idle_timeout_secs: 60,
+            },
+        };
+        r.provider.lobby.reply(id, Ok(Ws::GameCreated(created)));
+        let e = r.a.pump(r.now).unwrap_err().to_string();
+        assert!(e.contains("games.list answered with GameCreated"), "{e}");
+        assert!(!e.contains("s3cret") && !r.log.text().contains("s3cret"), "{e}");
     }
 
     fn filter(target: &str, wanted: &str) -> Filter {

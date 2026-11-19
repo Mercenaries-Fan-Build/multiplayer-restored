@@ -2,21 +2,36 @@
 //!
 //! The FESL adapter (on the game thread, inside ProtoSSL Update/Recv) submits a [`BackendRequest`] and
 //! later polls for its [`Outcome`]; a single worker thread executes requests in order with the blocking
-//! [`HttpsClient`]. The adapter is generic over [`Backend`] so tests can drive it without a network.
+//! [`HttpsClient`]. The adapter is generic over [`Backend`] so tests can drive it without a network. The
+//! leaderboard bindings ([`crate::leaderboard`]) submit their two requests through a handle of the same worker.
 
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::JoinHandle;
 
 use mercs2_mp_api::ApiError;
-use mercs2_mp_api::rest::{AccountCreated, CreateAccount, CreateSession, SessionCreated};
+use mercs2_mp_api::rest::{AccountCreated, CreateAccount, CreateSession, LeaderboardEntry, PushScore, SessionCreated};
 use serde::de::DeserializeOwned;
 
-use crate::http::HttpsClient;
+use mercs2_https::{HttpsClient, Method};
+
+/// A session token, sent as `Authorization: Bearer <token>`. Its `Debug` never shows it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Bearer(pub String);
+
+impl std::fmt::Debug for Bearer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Bearer(<redacted>)")
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BackendRequest {
     CreateAccount(CreateAccount),
     CreateSession(CreateSession),
+    /// `GET /v1/leaderboards/{board}/me`; `board` is the Lua string's bytes, sent as one encoded path segment.
+    LeaderboardMe { board: Vec<u8>, token: Bearer },
+    /// `PUT /v1/leaderboards/{board}/score` with `{"score": score}`.
+    LeaderboardPush { board: Vec<u8>, score: u32, token: Bearer },
 }
 
 impl BackendRequest {
@@ -24,6 +39,10 @@ impl BackendRequest {
         match self {
             BackendRequest::CreateAccount(c) => format!("POST /v1/accounts (username {:?})", c.username),
             BackendRequest::CreateSession(c) => format!("POST /v1/sessions (username {:?})", c.username),
+            BackendRequest::LeaderboardMe { board, .. } => format!("GET /v1/leaderboards/{}/me", crate::leaderboard::path_segment(board)),
+            BackendRequest::LeaderboardPush { board, score, .. } => {
+                format!("PUT /v1/leaderboards/{}/score (score {score})", crate::leaderboard::path_segment(board))
+            }
         }
     }
 }
@@ -32,6 +51,20 @@ impl BackendRequest {
 pub enum BackendReply {
     AccountCreated(AccountCreated),
     SessionCreated(SessionCreated),
+    /// The player's standing on a board, after a push or as asked.
+    LeaderboardEntry(LeaderboardEntry),
+}
+
+impl BackendReply {
+    /// The variant's name, for log lines: a `SessionCreated` holds the session token, so a reply is never
+    /// formatted with `Debug` into a log.
+    pub fn name(&self) -> &'static str {
+        match self {
+            BackendReply::AccountCreated(_) => "AccountCreated",
+            BackendReply::SessionCreated(_) => "SessionCreated",
+            BackendReply::LeaderboardEntry(_) => "LeaderboardEntry",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -51,20 +84,53 @@ pub trait Backend {
     fn poll(&mut self) -> Vec<(JobId, Outcome)>;
 }
 
-/// Typed REST calls on top of [`HttpsClient`].
+/// Largest REST response body accepted (`mercs2_https::Limits::max_body`). The largest success body the API
+/// defines is `SessionCreated`: a 64-hex-digit token, two i64 numbers and a display name of at most
+/// `rules::USERNAME_MAX` (31) ASCII characters, about 190 bytes of JSON. An `ApiError` body is a code and a
+/// server-written message, which the contract does not bound; the server's messages are a fixed text, or a fixed
+/// text plus a JSON or request-parsing error string, and an internal error is always the fixed "internal error".
+/// 64 KiB is over 300 times the largest defined body.
+pub const MAX_RESPONSE_BODY: usize = 64 * 1024;
+
+/// Typed REST calls on top of [`HttpsClient`]: `http` for the account and session routes, `boards` (the same
+/// server, with the leaderboards' own request deadline, [`crate::leaderboard::TIMEOUT`]) for the two
+/// leaderboard routes.
 pub struct RestApi {
     http: HttpsClient,
+    boards: HttpsClient,
 }
 
 impl RestApi {
-    pub fn new(http: HttpsClient) -> Self {
-        RestApi { http }
+    pub fn new(http: HttpsClient, boards: HttpsClient) -> Self {
+        RestApi { http, boards }
     }
 
     fn call<T: DeserializeOwned>(&self, route: &str, body: &impl serde::Serialize, expect: u16) -> Result<T, BackendFailure> {
         let json = serde_json::to_vec(body).map_err(|e| BackendFailure::Transport(format!("encode {route}: {e}")))?;
-        let resp = self.http.post_json(route, &json).map_err(|e| BackendFailure::Transport(e.to_string()))?;
-        let snippet = || String::from_utf8_lossy(&resp.body[..resp.body.len().min(200)]).into_owned();
+        self.send(&self.http, Method::Post, route, &[], Some(&json), expect)
+    }
+
+    /// `method route` on `client` with `headers` and an optional JSON body; the decoded body of an `expect`
+    /// answer, the `ApiError` of an error status, or why neither arrived.
+    fn send<T: DeserializeOwned>(
+        &self,
+        client: &HttpsClient,
+        method: Method,
+        route: &str,
+        headers: &[(&str, &str)],
+        json: Option<&[u8]>,
+        expect: u16,
+    ) -> Result<T, BackendFailure> {
+        let resp = client.request(method, route, headers, json).map_err(|e| BackendFailure::Transport(e.to_string()))?;
+        // The start of the body, for an error status only: a success body can hold the session token
+        // (`SessionCreated`), so of one that is not what was expected only its size is told.
+        let snippet = || {
+            if (200..300).contains(&resp.status) {
+                format!("<{} byte body>", resp.body.len())
+            } else {
+                String::from_utf8_lossy(&resp.body[..resp.body.len().min(200)]).into_owned()
+            }
+        };
         if resp.status == expect {
             return serde_json::from_slice(&resp.body).map_err(|e| {
                 BackendFailure::Transport(format!("{route}: HTTP {} body is not the expected JSON ({e}): {}", resp.status, snippet()))
@@ -84,6 +150,20 @@ impl RestApi {
         match req {
             BackendRequest::CreateAccount(c) => self.call("/v1/accounts", c, 201).map(BackendReply::AccountCreated),
             BackendRequest::CreateSession(c) => self.call("/v1/sessions", c, 200).map(BackendReply::SessionCreated),
+            BackendRequest::LeaderboardMe { board, token } => {
+                let route = format!("/v1/leaderboards/{}/me", crate::leaderboard::path_segment(board));
+                let auth = format!("Bearer {}", token.0);
+                self.send(&self.boards, Method::Get, &route, &[("Authorization", auth.as_str())], None, 200)
+                    .map(BackendReply::LeaderboardEntry)
+            }
+            BackendRequest::LeaderboardPush { board, score, token } => {
+                let route = format!("/v1/leaderboards/{}/score", crate::leaderboard::path_segment(board));
+                let auth = format!("Bearer {}", token.0);
+                let json = serde_json::to_vec(&PushScore { score: *score })
+                    .map_err(|e| BackendFailure::Transport(format!("encode {route}: {e}")))?;
+                self.send(&self.boards, Method::Put, &route, &[("Authorization", auth.as_str())], Some(&json), 200)
+                    .map(BackendReply::LeaderboardEntry)
+            }
         }
     }
 }
@@ -144,7 +224,7 @@ impl Backend for WorkerHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::http::tests::{client_for, serve_once, test_pki};
+    use mercs2_https::testing::{client_for, serve_once, test_pki};
     use mercs2_mp_api::rest::ClientInfo;
     use mercs2_mp_api::{ErrorCode, UserId};
     use std::time::{Duration, Instant};
@@ -160,7 +240,7 @@ mod tests {
     fn run(response: &[u8], req: BackendRequest) -> (Outcome, String) {
         let pki = test_pki();
         let (port, server) = serve_once(&pki, response.to_vec());
-        let api = RestApi::new(client_for(&pki.ca_pem, "localhost", port));
+        let api = RestApi::new(client_for(&pki.ca_pem, "localhost", port), client_for(&pki.ca_pem, "localhost", port));
         let out = api.execute(&req);
         let (raw, _) = server.join().unwrap().unwrap();
         (out, String::from_utf8(raw).unwrap())
@@ -214,6 +294,108 @@ mod tests {
 
         let (out, _) = run(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}", session_req());
         assert!(matches!(out, Err(BackendFailure::Transport(m)) if m.contains("not the expected JSON")));
+    }
+
+    fn ok_json(body: &str) -> Vec<u8> {
+        format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}", body.len()).into_bytes()
+    }
+
+    fn push(board: &str, score: u32) -> BackendRequest {
+        BackendRequest::LeaderboardPush { board: board.as_bytes().to_vec(), score, token: Bearer("t0k".into()) }
+    }
+
+    fn me(board: &str) -> BackendRequest {
+        BackendRequest::LeaderboardMe { board: board.as_bytes().to_vec(), token: Bearer("t0k".into()) }
+    }
+
+    #[test]
+    fn leaderboard_push_puts_the_score_with_the_bearer_token() {
+        let (out, raw) = run(&ok_json(r#"{"rank":4,"score":200000}"#), push("DlcCon004", 123456));
+        assert_eq!(out, Ok(BackendReply::LeaderboardEntry(LeaderboardEntry { rank: 4, score: 200000 })));
+        assert!(raw.starts_with("PUT /api/v1/leaderboards/DlcCon004/score HTTP/1.1\r\n"), "{raw}");
+        assert!(raw.contains("\r\nAuthorization: Bearer t0k\r\n"), "{raw}");
+        let json = &raw[raw.find("\r\n\r\n").unwrap() + 4..];
+        assert_eq!(serde_json::from_str::<serde_json::Value>(json).unwrap(), serde_json::json!({"score": 123456}));
+    }
+
+    #[test]
+    fn leaderboard_me_gets_the_standing_without_a_body() {
+        let (out, raw) = run(&ok_json(r#"{"rank":0,"score":0}"#), me("DlcCon001"));
+        assert_eq!(out, Ok(BackendReply::LeaderboardEntry(LeaderboardEntry { rank: 0, score: 0 })));
+        assert!(raw.starts_with("GET /api/v1/leaderboards/DlcCon001/me HTTP/1.1\r\n"), "{raw}");
+        assert!(raw.contains("\r\nAuthorization: Bearer t0k\r\n"), "{raw}");
+        assert!(raw.ends_with("\r\n\r\n") && !raw.contains("Content-Length"), "{raw}");
+    }
+
+    #[test]
+    fn leaderboard_refusals_are_api_errors() {
+        for (status, code, req) in [
+            ("401 Unauthorized", ErrorCode::Unauthorized, me("DlcCon001")),
+            ("401 Unauthorized", ErrorCode::Unauthorized, push("DlcCon001", 1)),
+            ("403 Forbidden", ErrorCode::Forbidden, push("DlcCon001", 1)),
+            ("422 Unprocessable Entity", ErrorCode::InvalidField, push("Dlc-Con", 1)),
+            ("422 Unprocessable Entity", ErrorCode::InvalidField, me("Dlc-Con")),
+        ] {
+            let body = serde_json::to_string(&ApiError::new(code, "refused")).unwrap();
+            let resp = format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+            let (out, _) = run(resp.as_bytes(), req.clone());
+            assert_eq!(out, Err(BackendFailure::Api(ApiError::new(code, "refused"))), "{status} {}", req.describe());
+        }
+    }
+
+    #[test]
+    fn leaderboard_routes_against_the_real_server() {
+        let srv = crate::testserver::TestServer::start();
+        let rest = srv.rest();
+        let who = srv.login("BoardPlayer");
+        let token = || Bearer(who.token.clone());
+        let me = |board: &str| BackendRequest::LeaderboardMe { board: board.as_bytes().to_vec(), token: token() };
+        let push = |board: &str, score| BackendRequest::LeaderboardPush { board: board.as_bytes().to_vec(), score, token: token() };
+        let entry = |rank, score| Ok(BackendReply::LeaderboardEntry(LeaderboardEntry { rank, score }));
+        assert_eq!(rest.execute(&me("DlcCon001")), entry(0, 0), "no entry yet");
+        assert_eq!(rest.execute(&push("DlcCon001", 500)), entry(1, 500));
+        assert_eq!(rest.execute(&push("DlcCon001", 100)), entry(1, 500), "a lower push keeps the best");
+        assert_eq!(rest.execute(&me("DlcCon001")), entry(1, 500));
+        let code = |o: Outcome| match o {
+            Err(BackendFailure::Api(e)) => e.code,
+            other => panic!("expected an ApiError, got {other:?}"),
+        };
+        assert_eq!(code(rest.execute(&push("Dlc-Con", 1))), ErrorCode::InvalidField);
+        assert_eq!(code(rest.execute(&push("DlcCon001", 1_000_000_001))), ErrorCode::InvalidField);
+        let stale = BackendRequest::LeaderboardMe { board: b"DlcCon001".to_vec(), token: Bearer("not-a-token".into()) };
+        assert_eq!(code(rest.execute(&stale)), ErrorCode::Unauthorized);
+        let db_path = srv.db_path.clone();
+        let user = who.user_id;
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async move {
+            let db = mercs2_mp_server::db::Db::open(&db_path).await.unwrap();
+            assert!(db.ban_from_leaderboards(user, "test", 1).await.unwrap());
+        });
+        assert_eq!(code(rest.execute(&push("DlcCon001", 600))), ErrorCode::Forbidden);
+    }
+
+    #[test]
+    fn a_success_body_that_is_not_the_expected_reply_is_told_by_size_only() {
+        // A session (token included) where an account was expected, and a session body that does not decode.
+        let session = r#"{"token":"s3cret-token","user_id":1,"display_name":"n","expires_at":1}"#;
+        let req = BackendRequest::CreateAccount(CreateAccount { username: "newbie".into(), password: "longenough".into() });
+        let (out, _) = run(&ok_json(session), req);
+        let Err(BackendFailure::Transport(m)) = out else { panic!("{out:?}") };
+        assert!(m.contains("unexpected HTTP 200 (expected 201)") && m.contains("byte body"), "{m}");
+        assert!(!m.contains("s3cret"), "{m}");
+        let (out, _) = run(&ok_json(r#"{"token":"s3cret-token"}"#), session_req());
+        let Err(BackendFailure::Transport(m)) = out else { panic!("{out:?}") };
+        assert!(m.contains("not the expected JSON") && !m.contains("s3cret"), "{m}");
+        // An error status still shows the start of its body.
+        let (out, _) = run(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 3\r\n\r\nbad", session_req());
+        assert!(matches!(out, Err(BackendFailure::Transport(m)) if m.ends_with("bad")));
+    }
+
+    #[test]
+    fn a_leaderboard_request_never_formats_its_token() {
+        for req in [push("DlcCon001", 5), me("DlcCon001")] {
+            assert!(!format!("{req:?}").contains("t0k") && !req.describe().contains("t0k"), "{req:?}");
+        }
+        assert_eq!(push("a/b c", 1).describe(), "PUT /v1/leaderboards/a%2Fb%20c/score (score 1)");
     }
 
     #[test]

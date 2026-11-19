@@ -1,10 +1,12 @@
 //! The lobby WebSocket (`GET <base>/v1/ws`, `mercs2_mp_api::ws`) on its own thread.
 //!
-//! Transport: the same TLS policy as the REST client ([`crate::tls`]: TLS ≥ 1.2, SNI, chain verification
+//! Transport: the same TLS policy as the REST client (`mercs2_https::tls`: TLS ≥ 1.2, SNI, chain verification
 //! against the embedded Mozilla bundle, hostname verification), `Authorization: Bearer <session token>` on
 //! the upgrade request, RFC 6455 framing by `tungstenite`. The TCP connect, TLS handshake and upgrade run
-//! blocking with the `[http]` timeouts; after that the socket is switched to non-blocking and the thread
-//! services it every `[websocket] poll_interval_ms` (sends queued requests, reads frames). `tungstenite`
+//! blocking with the `[http]` timeouts, and together must finish within `[http] request_timeout_ms` (name
+//! resolution aside: the system resolver cannot be interrupted); after that the socket is switched to
+//! non-blocking and the thread services it every `[websocket] poll_interval_ms` (sends queued requests, reads
+//! frames). `tungstenite`
 //! answers the server's pings itself; those pongs are what keeps the server's idle timer fed.
 //!
 //! Correlation: each request gets a process-unique id; the reply or error frame carrying that id is routed
@@ -18,7 +20,6 @@
 
 use std::collections::HashMap;
 use std::io::ErrorKind;
-use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::sync::{Arc, Mutex};
@@ -30,7 +31,9 @@ use openssl::ssl::{SslConnector, SslStream};
 use tungstenite::client::IntoClientRequest;
 use tungstenite::{HandshakeError, Message, WebSocket};
 
-use crate::config::BaseUrl;
+use mercs2_https::BaseUrl;
+use mercs2_https::http::DeadlineStream;
+
 use crate::lobby::{Lobby, LobbyEvent, LobbyProvider};
 use crate::log::Logger;
 use crate::session::LoggedIn;
@@ -42,6 +45,8 @@ pub struct WsSettings {
     pub connector: SslConnector,
     pub connect_timeout: Duration,
     pub io_timeout: Duration,
+    /// The TCP connect, TLS handshake and upgrade together.
+    pub open_timeout: Duration,
     pub poll_interval: Duration,
     pub idle_timeout: Duration,
 }
@@ -211,7 +216,7 @@ impl Lobby for WsLobby {
     }
 }
 
-type Ws = WebSocket<SslStream<TcpStream>>;
+type Ws = WebSocket<SslStream<DeadlineStream>>;
 
 /// URL of the WebSocket route for `base`.
 pub fn ws_url(base: &BaseUrl) -> String {
@@ -224,24 +229,35 @@ pub fn ws_url(base: &BaseUrl) -> String {
 
 fn connect(settings: &WsSettings, token: &str) -> Result<Ws, String> {
     let base = &settings.base;
-    let tcp = crate::http::connect_tcp(base, settings.connect_timeout, settings.io_timeout).map_err(|e| e.to_string())?;
-    let tls = settings
-        .connector
-        .connect(&base.host, tcp)
-        .map_err(|e| format!("TLS handshake with {} failed: {e}", base.host))?;
+    let stream = DeadlineStream::connect(base, settings.connect_timeout, settings.io_timeout, settings.open_timeout)
+        .map_err(|e| e.to_string())?;
+    let deadline = stream.flag();
+    let late = |what: String| {
+        if deadline.passed() {
+            format!("the lobby WebSocket did not open within {} ms: {what}", settings.open_timeout.as_millis())
+        } else {
+            what
+        }
+    };
+    let tls = mercs2_https::tls::connect(&settings.connector, &base.host, stream)
+        .map_err(|e| late(format!("TLS handshake with {} failed: {e}", base.host)))?;
     let url = ws_url(base);
     let mut req = url.as_str().into_client_request().map_err(|e| format!("WebSocket request for {url}: {e}"))?;
     let auth = format!("Bearer {token}").parse().map_err(|e| format!("Authorization header: {e}"))?;
     req.headers_mut().insert("authorization", auth);
-    let (ws, _) = tungstenite::client::client(req, tls).map_err(|e| match e {
-        HandshakeError::Failure(tungstenite::Error::Http(rsp)) => {
-            let body = rsp.body().as_ref().map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_default();
-            format!("WebSocket upgrade refused with HTTP {}: {body}", rsp.status())
-        }
-        HandshakeError::Failure(e) => format!("WebSocket upgrade failed: {e}"),
-        HandshakeError::Interrupted(_) => "WebSocket upgrade interrupted on a blocking socket".to_string(),
+    let (mut ws, _) = tungstenite::client::client(req, tls).map_err(|e| {
+        late(match e {
+            HandshakeError::Failure(tungstenite::Error::Http(rsp)) => {
+                let body = rsp.body().as_ref().map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_default();
+                format!("WebSocket upgrade refused with HTTP {}: {body}", rsp.status())
+            }
+            HandshakeError::Failure(e) => format!("WebSocket upgrade failed: {e}"),
+            HandshakeError::Interrupted(_) => "WebSocket upgrade interrupted on a blocking socket".to_string(),
+        })
     })?;
-    ws.get_ref().get_ref().set_nonblocking(true).map_err(|e| format!("cannot make the lobby socket non-blocking: {e}"))?;
+    // Open: the session runs non-blocking with its own idle limit from here on.
+    ws.get_mut().get_mut().end_deadline();
+    ws.get_ref().get_ref().tcp().set_nonblocking(true).map_err(|e| format!("cannot make the lobby socket non-blocking: {e}"))?;
     Ok(ws)
 }
 
@@ -307,8 +323,9 @@ fn inbound(shared: &Shared, log: &Logger, msg: Message) -> Result<(), String> {
         Message::Ping(_) | Message::Pong(_) => return Ok(()),
         Message::Binary(_) | Message::Frame(_) => return Err("the server sent a non-text frame".into()),
     };
-    let frame: ServerFrame =
-        serde_json::from_str(text.as_str()).map_err(|e| format!("server frame is not mercs2_mp_api v1 JSON ({e}): {}", text.as_str()))?;
+    // The frame's size only, never its text: a reply or push can carry the relay session token and the keys.
+    let frame: ServerFrame = serde_json::from_str(text.as_str())
+        .map_err(|e| format!("server frame ({} bytes) is not mercs2_mp_api v1 JSON ({e})", text.as_str().len()))?;
     let (id, result) = match frame {
         ServerFrame::Reply { id, response } => (id, Ok(response)),
         ServerFrame::Error { id, error } => (id, Err(error)),
@@ -316,7 +333,7 @@ fn inbound(shared: &Shared, log: &Logger, msg: Message) -> Result<(), String> {
             let sink = shared.pushes.lock().map_err(|_| "lobby push lock poisoned".to_string())?;
             let delivered = sink.as_ref().is_some_and(|tx| tx.send(push.clone()).is_ok());
             if !delivered {
-                log.error(format!("lobby push with no Theater connection to deliver it to: {push:?}"));
+                log.error(format!("lobby push {} with no Theater connection to deliver it to", crate::lobby::push_name(&push)));
             }
             return Ok(());
         }
@@ -428,6 +445,37 @@ mod tests {
         let srv = TestServer::start();
         let p = WsLobbyProvider::new(srv.ws_settings(), srv.log());
         assert!(p.handle(true).err().unwrap().contains("has not logged in"));
+    }
+
+    #[test]
+    fn a_dribbled_upgrade_response_hits_the_open_deadline() {
+        // One byte every 300 ms never trips the 2 s I/O timeout; the 1.5 s open deadline ends it.
+        use std::io::Write;
+        let pki = mercs2_https::testing::test_pki();
+        let (port, server) = mercs2_https::testing::serve_with(&pki, |s| {
+            let head = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nX-Pad: pppppppp\r\n\r\n";
+            for b in head {
+                if s.write_all(&[*b]).is_err() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(300));
+            }
+        });
+        let settings = WsSettings {
+            base: BaseUrl { host: "localhost".into(), port, prefix: String::new() },
+            connector: mercs2_https::tls::connector(&pki.ca_pem).unwrap(),
+            connect_timeout: Duration::from_secs(5),
+            io_timeout: Duration::from_secs(2),
+            open_timeout: Duration::from_millis(1500),
+            poll_interval: Duration::from_millis(2),
+            idle_timeout: Duration::from_secs(20),
+        };
+        let start = Instant::now();
+        let e = connect(&settings, "tok").err().unwrap();
+        let took = start.elapsed();
+        assert!(e.starts_with("the lobby WebSocket did not open within 1500 ms: "), "{e}");
+        assert!(took >= Duration::from_millis(1500) && took < Duration::from_millis(2500), "{took:?}");
+        server.join().unwrap().unwrap();
     }
 
     #[test]

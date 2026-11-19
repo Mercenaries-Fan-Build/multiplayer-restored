@@ -31,6 +31,8 @@
 //! [http]
 //! connect_timeout_ms = 10000              ; also used for the lobby WebSocket's TCP connect
 //! io_timeout_ms = 15000                   ; also bounds the WebSocket's TLS + upgrade handshake
+//! request_timeout_ms = 30000              ; a whole REST request: connect, TLS handshake, send, full response;
+//!                                         ; also bounds opening the lobby WebSocket (connect, TLS, upgrade)
 //!
 //! [websocket]
 //! poll_interval_ms = 10                   ; lobby WebSocket thread: how often it services its socket
@@ -54,6 +56,7 @@
 use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 
+use mercs2_https::BaseUrl;
 use thiserror::Error;
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -72,48 +75,6 @@ pub enum ConfigError {
     Missing { section: &'static str, key: &'static str },
     #[error("[{section}] {key}: {msg}")]
     Invalid { section: &'static str, key: &'static str, msg: String },
-}
-
-/// `https://host[:port][/prefix]`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BaseUrl {
-    pub host: String,
-    pub port: u16,
-    /// Path prefix without a trailing slash; empty for none.
-    pub prefix: String,
-}
-
-impl BaseUrl {
-    pub fn parse(s: &str) -> Result<Self, String> {
-        let rest = s.strip_prefix("https://").ok_or("must start with https://")?;
-        if rest.contains(['?', '#']) {
-            return Err("must not contain a query or fragment".into());
-        }
-        let (authority, path) = match rest.find('/') {
-            Some(i) => (&rest[..i], &rest[i..]),
-            None => (rest, ""),
-        };
-        if authority.contains('@') {
-            return Err("must not contain user info".into());
-        }
-        let (host, port) = match authority.rsplit_once(':') {
-            Some((h, p)) => (h, p.parse::<u16>().map_err(|_| format!("port {p:?} is not a number 1-65535"))?),
-            None => (authority, 443),
-        };
-        if port == 0 {
-            return Err("port 0 is invalid".into());
-        }
-        if host.is_empty() || !host.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-') {
-            return Err(format!("host {host:?} must be a DNS name or IPv4 address"));
-        }
-        let prefix = path.trim_end_matches('/').to_owned();
-        Ok(BaseUrl { host: host.to_ascii_lowercase(), port, prefix })
-    }
-
-    /// The request target for an API route such as `/v1/sessions`.
-    pub fn path(&self, route: &str) -> String {
-        format!("{}{route}", self.prefix)
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -156,6 +117,7 @@ pub struct Config {
     pub countries: Vec<Country>,
     pub connect_timeout_ms: u32,
     pub io_timeout_ms: u32,
+    pub request_timeout_ms: u32,
     pub ws_poll_interval_ms: u32,
     pub ws_idle_timeout_secs: u32,
     pub relay: RelayConfig,
@@ -170,7 +132,7 @@ const SCHEMA: &[(&str, &[&str])] = &[
     ("messenger", &["advertise_ip", "advertise_port"]),
     ("privacy", &["room_key"]),
     ("account", &["terms_of_service", "countries"]),
-    ("http", &["connect_timeout_ms", "io_timeout_ms"]),
+    ("http", &["connect_timeout_ms", "io_timeout_ms", "request_timeout_ms"]),
     ("websocket", &["poll_interval_ms", "idle_timeout_secs"]),
     ("relay", &["alias_base", "alias_tunnel_port", "dtls_mtu", "handshake_timeout_ms", "poll_interval_ms", "close_grace_ms"]),
     ("startup", &["signature_wait_ms"]),
@@ -375,6 +337,7 @@ impl Config {
             countries,
             connect_timeout_ms: get_u32(&raw, "http", "connect_timeout_ms")?,
             io_timeout_ms: get_u32(&raw, "http", "io_timeout_ms")?,
+            request_timeout_ms: get_u32(&raw, "http", "request_timeout_ms")?,
             ws_poll_interval_ms: get_u32(&raw, "websocket", "poll_interval_ms")?,
             ws_idle_timeout_secs: get_u32(&raw, "websocket", "idle_timeout_secs")?,
             relay: get_relay(&raw)?,
@@ -419,6 +382,7 @@ countries = US:United States|GB:United Kingdom
 [http]
 connect_timeout_ms = 10000
 io_timeout_ms = 15000
+request_timeout_ms = 30000
 
 [websocket]
 poll_interval_ms = 10
@@ -457,6 +421,7 @@ file = multiplayer_restored.log
         assert_eq!(c.lobby_name, "Online games");
         assert_eq!((c.theater_activity_timeout_secs, c.theater_keepalive_interval_secs), (240, 60));
         assert_eq!((c.ws_poll_interval_ms, c.ws_idle_timeout_secs), (10, 75));
+        assert_eq!((c.connect_timeout_ms, c.io_timeout_ms, c.request_timeout_ms), (10000, 15000, 30000));
         assert_eq!(
             c.relay,
             RelayConfig {
@@ -529,6 +494,11 @@ file = multiplayer_restored.log
             ("intercept_names = fesl.ea.com, mercs2-pc.fesl.ea.com", "intercept_names = fesl.ea.com:18710"),
             ("io_timeout_ms = 15000", "io_timeout_ms = 0"),
             ("io_timeout_ms = 15000", "io_timeout_ms ="),
+            ("request_timeout_ms = 30000", "request_timeout_ms = 0"),
+            ("request_timeout_ms = 30000", "request_timeout_ms ="),
+            ("https://mp.example.org/api/", "https://mp.example.org/api\rX-Injected: 1"),
+            ("https://mp.example.org/api/", "https://mp.example.org/a b"),
+            ("https://mp.example.org/api/", "https://mp.example.org/é"),
         ] {
             let t = SAMPLE.replace(from, to);
             assert_ne!(t, SAMPLE, "replacement {from:?} did not apply");
