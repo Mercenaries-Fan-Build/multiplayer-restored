@@ -11,7 +11,7 @@ use mercs2_mp_api::ApiError;
 use mercs2_mp_api::rest::{AccountCreated, CreateAccount, CreateSession, SessionCreated};
 use serde::de::DeserializeOwned;
 
-use crate::http::HttpsClient;
+use mercs2_https::HttpsClient;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BackendRequest {
@@ -144,7 +144,7 @@ impl Backend for WorkerHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::http::tests::{client_for, serve_once, test_pki};
+    use mercs2_https::testing::{client_for, serve_once, test_pki};
     use mercs2_mp_api::rest::ClientInfo;
     use mercs2_mp_api::{ErrorCode, UserId};
     use std::time::{Duration, Instant};
