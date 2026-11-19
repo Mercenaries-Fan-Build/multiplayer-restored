@@ -1,0 +1,17 @@
+[package]
+name = "mercs2_https"
+version = "0.1.0"
+description = "Blocking HTTPS/1.1 client with one trust policy (vendored OpenSSL 3, embedded Mozilla CA bundle), shared by the Mercenaries 2 ASIs"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[dependencies]
+openssl = { version = "0.10", features = ["vendored"] }
+# Pins the vendored OpenSSL to the 3.x series (openssl-src 300.x builds OpenSSL 3.x).
+openssl-src = "300"
+httparse = "1"
+thiserror = "2"
+
+[dev-dependencies]
+sha2 = "0.10"
