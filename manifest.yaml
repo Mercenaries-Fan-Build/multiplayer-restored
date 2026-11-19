@@ -27,7 +27,8 @@ contributions:
   # GVStartup are detoured to do nothing, so in-game voice never starts (client/src/voice.rs). It also adds the
   # leaderboard functions PC v1.1 never registered to the engine's own Net and Pg tables through m2-sdk.dll's
   # Lua host (client/src/leaderboard.rs, net.rs, cheats.rs): the boards live on the multiplayer server, and the
-  # cheats pair gates the push, as PS3 v1.03 does.
+  # cheats pair gates the push, as PS3 v1.03 does. Ships together with the blow-it-up-again update that removed
+  # these five names from its own touches (it requires m2-sdk >=0.6.2 and no longer reads mr_session_v1).
   - kind: native_hook
     target: retail
     plugin: src/multiplayer_restored.asi
