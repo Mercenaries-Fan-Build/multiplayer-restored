@@ -37,7 +37,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBo
 
 use crate::config::Config;
 use crate::fesl::{FeslAdapter, FeslSettings};
-use crate::http::HttpsClient;
+use mercs2_https::HttpsClient;
+
 use crate::lobby::LobbyProvider;
 use crate::log::Logger;
 use crate::relay::{AliasPlan, RelayFactory, ShimFactory, ShimSettings};
@@ -337,8 +338,8 @@ fn init(hinst: usize) {
         cfg.server.port,
         cfg.server.prefix,
         openssl::version::version(),
-        crate::tls::CA_BUNDLE_SHA256,
-        crate::tls::CA_BUNDLE_MOZILLA_DATE
+        mercs2_https::tls::CA_BUNDLE_SHA256,
+        mercs2_https::tls::CA_BUNDLE_MOZILLA_DATE
     ));
 
     let sdk = rt::loaded_version();
@@ -357,7 +358,7 @@ fn init(hinst: usize) {
     }
     crate::lua::win::install(&img.image, &log, fatal);
 
-    let connector = crate::tls::mozilla_connector().unwrap_or_else(|e| fatal(Some(&log), &format!("TLS setup: {e}")));
+    let connector = mercs2_https::tls::mozilla_connector().unwrap_or_else(|e| fatal(Some(&log), &format!("TLS setup: {e}")));
     log.info("TLS connector ready (CA bundle loaded)");
     let lobby = WsLobbyProvider::new(
         WsSettings {
@@ -385,7 +386,9 @@ fn init(hinst: usize) {
         cfg.server.clone(),
         Duration::from_millis(cfg.connect_timeout_ms.into()),
         Duration::from_millis(cfg.io_timeout_ms.into()),
-    );
+        &crate::user_agent(),
+    )
+    .unwrap_or_else(|e| fatal(Some(&log), &format!("REST client: {e}")));
     let api = RestApi::new(http);
     let worker = Worker::spawn(move |req| api.execute(req))
         .unwrap_or_else(|e| fatal(Some(&log), &format!("cannot start the worker thread: {e}")));
@@ -418,6 +421,28 @@ fn init(hinst: usize) {
     install_hooks(&img, &voice, &log);
     log.info("ProtoSSL detours installed: Connect Disconnect Destroy Update Send Recv Stat");
     log.info("GameSpy Voice disabled (GVInitialize, GVStartup detoured); use external voice chat");
+}
+
+/// `int __cdecl mr_session_v1(MrSessionV1 *out)` (`include/multiplayer_restored.h`): the logged-in session for
+/// other ASIs. 1 = signed in, 0 = not signed in (also before start-up has finished), -1 = error (logged when
+/// the log is open). The rules are [`crate::session_export::export`]'s.
+///
+/// # Safety
+/// `out` is NULL or points to a caller-owned `MrSessionV1` whose `struct_size` the caller has set.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mr_session_v1(out: *mut crate::session_export::MrSessionV1) -> i32 {
+    let runtime = RUNTIME.get();
+    let source = runtime.map(|r| crate::session_export::Source { server: &r.cfg.server, session: &r.factory.session });
+    match unsafe { crate::session_export::export(out, source) } {
+        Ok(true) => 1,
+        Ok(false) => 0,
+        Err(e) => {
+            if let Some(r) = runtime {
+                r.log.error(format!("mr_session_v1: {e}"));
+            }
+            -1
+        }
+    }
 }
 
 /// # Safety
