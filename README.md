@@ -14,10 +14,19 @@ relay, so no player's address is shown to another player.
 | `multiplayer_restored.asi` | `scripts\` | The client plugin. It finds the game's ProtoSSL and GameSpy Voice functions by byte signature and stops the game with a message if the exe does not match. |
 | `multiplayer_restored.ini` | `scripts\` | Required settings; the plugin refuses to start without it, or with a missing or unknown key. |
 
-It requires the [m2-sdk](https://github.com/Mercenaries-Fan-Build/mercs2-sdk) Shipment (`^0.4`), which places
-`m2-sdk.dll` in the game root: the plugin imports it, every hook it installs goes through the SDK's shared
-MinHook instance, and its `Mp` Lua namespace is registered through the SDK's Lua host. Without that DLL
+It requires the [m2-sdk](https://github.com/Mercenaries-Fan-Build/mercs2-sdk) Shipment (`>=0.6.2`), which
+places `m2-sdk.dll` in the game root: the plugin imports it, every hook it installs goes through the SDK's
+shared MinHook instance, and its Lua functions are registered through the SDK's Lua host. Without that DLL
 Windows does not load the plugin at all.
+
+## Leaderboards
+
+The plugin adds the leaderboard functions the game's Blow It Up Again DLC calls and PC v1.1 never registered:
+`Net.LeaderboardGetScore`, `Net.LeaderboardPushScore`, `Net.GetUserName`, `Pg.SetCheatsUsed` and
+`Pg.WereCheatsUsed`, with the PS3 v1.03 behaviour. The boards live on the multiplayer server: a score is
+pushed and read as the player who is logged in online, and a save in which cheats were used pushes nothing.
+Offline, or when the server refuses, the game gets no answer, as on PS3. The server's public board pages are
+what sites such as mercs.ink show.
 
 ## Setup
 
@@ -43,29 +52,28 @@ The plugin exports one function besides `DllMain`, declared in
 [`client/include/multiplayer_restored.h`](client/include/multiplayer_restored.h):
 
 ```c
-typedef struct { uint32_t struct_size; char server_base_url[256]; char token[512]; char username[64]; } MrSessionV1;
+typedef struct {
+    uint32_t struct_size; uint32_t signed_in; int64_t account_id; int64_t expires_at; char username[64];
+} MrSessionV1;
 int __cdecl mr_session_v1(MrSessionV1 *out);
 ```
 
-It hands another mod the multiplayer-server session the player signed in with this run (the game's online
-**Login**), so that mod can call the server's API as the player with `Authorization: Bearer <token>`.
+It tells another mod who is signed in to the multiplayer server this run (the game's online **Login**). The
+session token never leaves the plugin; the leaderboards, which need it, run inside the plugin.
 
-- **1:** signed in. `*out` holds the server's base URL, the bearer token and the username.
-  - The URL is the `[server] base_url` of the ini in canonical form: `https://host[:port][/prefix]`, with the
-    port only when it is not 443 and no trailing slash.
-  - Every string is NUL-terminated UTF-8.
+- **1:** signed in. `*out` holds `signed_in = 1`, the account's user id, when the server ends the session
+  (Unix seconds) and the username (NUL-terminated UTF-8).
 - **0:** not signed in, including while the plugin is still starting up. `*out` is all zero except
   `struct_size`.
 - **-1:** an error, in one of three cases:
-  - `out` is NULL, or `out->struct_size` is not `sizeof(MrSessionV1)` (836). Nothing is written.
-  - A value does not fit its field. Values are never truncated; `*out` is all zero except `struct_size`, and
+  - `out` is NULL, or `out->struct_size` is not `sizeof(MrSessionV1)` (88). Nothing is written.
+  - The username does not fit its field. It is never truncated; `*out` is all zero except `struct_size`, and
     the reason goes to `multiplayer_restored.log`.
-  - An internal error. Handled like a value that does not fit.
+  - An internal error. Handled like a username that does not fit.
 
-The session lasts until `Mp.Logout` or the next Login. The token expires when the server says it does; the
-server answers an expired or revoked token with HTTP 401. `Mp.Logout` ends the plugin's own use of the token
-but does not revoke it (the server's API has no route for that), so a copy a mod took earlier stays valid
-until its expiry.
+The session lasts until `Mp.Logout` or the next Login, and the server ends it at `expires_at`. `Mp.Logout`
+ends the plugin's own use of the session but does not revoke it on the server (the server's API has no route
+for that).
 
 The function is thread-safe and never touches the network. A mod resolves it when it needs it, not in its own
 `DllMain`, because the plugin load order is not guaranteed:
