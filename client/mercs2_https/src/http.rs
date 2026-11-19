@@ -24,8 +24,8 @@ use thiserror::Error;
 
 use crate::url::BaseUrl;
 
-/// Upper bound on a response's status line and header block. The multiplayer server sends three headers
-/// (`content-type`, `content-length`, `date`: about 100 bytes); this leaves room for a reverse proxy's own.
+/// Upper bound on a response's status line and header block: a policy bound, far above the few short headers a
+/// JSON API response carries, with room for a reverse proxy's own.
 pub const MAX_HEAD: usize = 16 * 1024;
 const MAX_HEADERS: usize = 64;
 /// Upper bound on one chunk-size line (the hex size and any chunk extensions, without its CRLF).
@@ -357,9 +357,12 @@ impl Read for DeadlineStream {
 }
 
 /// Whether a changed socket timeout took effect. macOS refuses `setsockopt` with `EINVAL` once the connection is
-/// shut down in both directions (xnu `sosetoptlock`): a read then returns at once (data still buffered, or end
-/// of stream) and a write fails at once, so neither can wait and the call goes ahead with the old timeout.
-/// Every other error, std's own `InvalidInput` for a zero timeout included, is returned.
+/// shut down in both directions (shown by the test
+/// `a_read_after_the_peer_closed_needs_its_timeout_changed_and_still_completes`): a read then returns at once
+/// (data still buffered, or end of stream) and a write fails at once, so the call goes ahead with the old
+/// timeout. Should `EINVAL` mean anything else, that one call still waits at most the old timeout, which is
+/// never more than `io_timeout`. Every other error, std's own `InvalidInput` for a zero timeout included, is
+/// returned.
 fn rearm(set: io::Result<()>) -> io::Result<bool> {
     match set {
         Ok(()) => Ok(true),
