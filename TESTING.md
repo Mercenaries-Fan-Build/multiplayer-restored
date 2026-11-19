@@ -37,8 +37,8 @@ Start the game and stay on the main menu.
   3. `signature OnlineAccountClear -> 0x… (account name 0x…, password 0x…)` (`lua/win.rs:106`), then `Lua
      namespace Mp (GetRoomKey, SetRoomKey, Logout) added through m2-sdk.dll` (`lua/win.rs:118`);
   4. `TLS connector ready (CA bundle loaded)` (`win/mod.rs:362`), `runtime ready (worker thread, connection
-     table)` (`:420`), then `ProtoSSL detours installed: Connect Disconnect Destroy Update Send Recv Stat` (`:422`)
-     and `GameSpy Voice disabled (GVInitialize, GVStartup detoured); use external voice chat` (`:423`).
+     table)` (`:421`), then `ProtoSSL detours installed: Connect Disconnect Destroy Update Send Recv Stat` (`:423`)
+     and `GameSpy Voice disabled (GVInitialize, GVStartup detoured); use external voice chat` (`:424`).
 - **Failure looks like:** a message box naming the problem, then the game exits. Send the box text + log.
 - Send back: the `build .text sha256` value and which exe you ran (retail / bypass / nodrm). That value pins
   the build in the ASI's table.
@@ -49,7 +49,7 @@ Online → **Create Account** with a new username (3–31 letters/digits/`_-.`) 
 
 - Log: `AddAccount: account "<name>" created (user N)` (`fesl.rs:501`). Server log: one `POST /v1/accounts` 201.
 - Then **Login** with it. Log: `Login: "<name>" logged in as "<name>" (user N)` (`fesl.rs:485`), then
-  `lobby WebSocket connected to <domain>` (`ws.rs:253`).
+  `lobby WebSocket connected to <domain>` (`ws.rs:270`).
 - Negative: log in with a wrong password → the game shows its "account not found" message (code 101); log
   `Login: server refused: …` (`fesl.rs:507`).
 - Negative: create the same username again → the game shows an error; log `server refused: … name_taken`.
