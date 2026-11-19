@@ -51,6 +51,13 @@ pub trait Backend {
     fn poll(&mut self) -> Vec<(JobId, Outcome)>;
 }
 
+/// Largest REST response body accepted (`mercs2_https::Limits::max_body`). The largest success body the API
+/// defines is `SessionCreated`: a 64-hex-digit token, two i64 numbers and a display name of at most
+/// `rules::USERNAME_MAX` (31) ASCII characters, about 190 bytes of JSON. An `ApiError` body is a code and a
+/// server-written message, which the contract does not bound; the server's messages are a fixed text plus at
+/// most a serde or database error string. 64 KiB is over 300 times the largest defined body.
+pub const MAX_RESPONSE_BODY: usize = 64 * 1024;
+
 /// Typed REST calls on top of [`HttpsClient`].
 pub struct RestApi {
     http: HttpsClient,
