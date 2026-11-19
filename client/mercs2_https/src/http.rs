@@ -205,26 +205,17 @@ impl HttpsClient {
         }
         head.push_str("Connection: close\r\n\r\n");
 
-        let deadline = Instant::now() + self.limits.request_timeout;
-        let expired = Arc::new(AtomicBool::new(false));
-        match self.exchange(&head, json, deadline, &expired) {
-            Err(_) if expired.load(Ordering::Relaxed) => {
-                Err(HttpError::Deadline { host: host.clone(), after: self.limits.request_timeout })
-            }
+        let l = &self.limits;
+        let stream = DeadlineStream::connect(&self.base, l.connect_timeout, l.io_timeout, l.request_timeout)?;
+        let deadline = stream.flag();
+        match self.exchange(&head, json, stream) {
+            Err(_) if deadline.passed() => Err(HttpError::Deadline { host: host.clone(), after: l.request_timeout }),
             other => other,
         }
     }
 
-    fn exchange(
-        &self,
-        head: &str,
-        json: Option<&[u8]>,
-        deadline: Instant,
-        expired: &Arc<AtomicBool>,
-    ) -> Result<Response, HttpError> {
+    fn exchange(&self, head: &str, json: Option<&[u8]>, stream: DeadlineStream) -> Result<Response, HttpError> {
         let host = &self.base.host;
-        let tcp = connect_until(&self.base, self.limits.connect_timeout, self.limits.io_timeout, Some((deadline, expired)))?;
-        let stream = DeadlineStream::new(tcp, self.limits.io_timeout, deadline, expired.clone());
         let mut tls = crate::tls::connect(&self.connector, host, stream)
             .map_err(|e| HttpError::Tls { host: host.clone(), msg: e.to_string() })?;
         let io = |e: std::io::Error| HttpError::Io { host: host.clone(), msg: e.to_string() };
@@ -242,20 +233,15 @@ impl HttpsClient {
     }
 }
 
-/// Resolve `base` and open a TCP connection to the first address that accepts, with blocking read/write
-/// timeouts of `io_timeout` and Nagle off. Shared by the REST client and the lobby WebSocket. `base` must pass
-/// [`BaseUrl::validate`].
-pub fn connect_tcp(base: &BaseUrl, connect_timeout: Duration, io_timeout: Duration) -> Result<TcpStream, HttpError> {
-    connect_until(base, connect_timeout, io_timeout, None)
-}
-
-/// [`connect_tcp`], with every connect attempt also bounded by `deadline` (which sets `expired` once it
-/// has passed).
+/// Resolve `base` and open a TCP connection to the first address that accepts, each attempt bounded by
+/// `connect_timeout` and by `deadline` (which sets `expired` once it has passed), with blocking read/write
+/// timeouts of `io_timeout` and Nagle off. `base` must pass [`BaseUrl::validate`].
 fn connect_until(
     base: &BaseUrl,
     connect_timeout: Duration,
     io_timeout: Duration,
-    deadline: Option<(Instant, &AtomicBool)>,
+    deadline: Instant,
+    expired: &AtomicBool,
 ) -> Result<TcpStream, HttpError> {
     base.validate().map_err(|msg| HttpError::Request { msg: format!("base URL: {msg}") })?;
     let (host, port) = (&base.host, base.port);
@@ -268,19 +254,13 @@ fn connect_until(
     }
     let mut errors = Vec::new();
     for a in &addrs {
-        let timeout = match deadline {
-            None => connect_timeout,
-            Some((at, expired)) => {
-                let left = at.saturating_duration_since(Instant::now());
-                if left.is_zero() {
-                    expired.store(true, Ordering::Relaxed);
-                    errors.push(format!("{a}: request deadline passed"));
-                    break;
-                }
-                connect_timeout.min(left)
-            }
-        };
-        match TcpStream::connect_timeout(a, timeout) {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            expired.store(true, Ordering::Relaxed);
+            errors.push(format!("{a}: request deadline passed"));
+            break;
+        }
+        match TcpStream::connect_timeout(a, connect_timeout.min(left)) {
             Ok(s) => {
                 let io = |e: std::io::Error| HttpError::Io { host: host.clone(), msg: e.to_string() };
                 s.set_read_timeout(Some(io_timeout)).map_err(io)?;
@@ -291,33 +271,86 @@ fn connect_until(
             Err(e) => errors.push(format!("{a}: {e}")),
         }
     }
-    if let Some((at, expired)) = deadline
-        && Instant::now() >= at
-    {
+    if Instant::now() >= deadline {
         expired.store(true, Ordering::Relaxed);
     }
     Err(HttpError::Connect { host: host.clone(), port, msg: errors.join("; ") })
 }
 
-/// A TCP stream whose every read and write waits at most `io_timeout` and never past `deadline`. Each call
-/// waits at most `min(io_timeout, time left)`, and the socket timeout is changed whenever that differs from
+/// A TCP stream whose every read and write waits at most `io_timeout` and never past a deadline, used under TLS
+/// by the REST client and, until its upgrade is done, by a WebSocket ([`DeadlineStream::end_deadline`]). Each
+/// call waits at most `min(io_timeout, time left)`, and the socket timeout is changed whenever that differs from
 /// the one set, so slow reads (a server dribbling a byte at a time, the TLS handshake's included) cannot add up
-/// past the deadline. Once the deadline has passed every call fails and `expired` is set.
+/// past the deadline. Once the deadline has passed every call fails and [`DeadlineStream::flag`] reports it.
 #[derive(Debug)]
-struct DeadlineStream {
+pub struct DeadlineStream {
     tcp: TcpStream,
     io_timeout: Duration,
-    deadline: Instant,
+    /// `None` once [`DeadlineStream::end_deadline`] has been called.
+    deadline: Option<Instant>,
     expired: Arc<AtomicBool>,
     /// The socket's read and write timeouts as last set.
     read_armed: Duration,
     write_armed: Duration,
+    /// A read returned end of stream: the peer has closed its sending side, so every later read returns at once
+    /// and needs no timeout; the read timeout is not changed again.
+    eof: bool,
+}
+
+/// Whether a [`DeadlineStream`]'s deadline has passed. It stays readable after the stream has been handed to
+/// TLS, so a caller can tell a deadline failure from any other.
+#[derive(Clone, Debug)]
+pub struct DeadlineFlag(Arc<AtomicBool>);
+
+impl DeadlineFlag {
+    pub fn passed(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
 }
 
 impl DeadlineStream {
-    /// `tcp` has both timeouts set to `io_timeout` ([`connect_until`]).
-    fn new(tcp: TcpStream, io_timeout: Duration, deadline: Instant, expired: Arc<AtomicBool>) -> Self {
-        DeadlineStream { tcp, io_timeout, deadline, expired, read_armed: io_timeout, write_armed: io_timeout }
+    /// Resolve `base` (name resolution is not bounded by the deadline: the system resolver cannot be
+    /// interrupted) and connect to the first address that accepts; from then on the connect attempts and every
+    /// read and write must finish within `deadline_after` of this call. Each connect attempt also waits at most
+    /// `connect_timeout`, each read or write at most `io_timeout`. `base` must pass [`BaseUrl::validate`].
+    pub fn connect(
+        base: &BaseUrl,
+        connect_timeout: Duration,
+        io_timeout: Duration,
+        deadline_after: Duration,
+    ) -> Result<Self, HttpError> {
+        let deadline = Instant::now() + deadline_after;
+        let expired = Arc::new(AtomicBool::new(false));
+        match connect_until(base, connect_timeout, io_timeout, deadline, &expired) {
+            Ok(tcp) => Ok(DeadlineStream {
+                tcp,
+                io_timeout,
+                deadline: Some(deadline),
+                expired,
+                read_armed: io_timeout,
+                write_armed: io_timeout,
+                eof: false,
+            }),
+            Err(_) if expired.load(Ordering::Relaxed) => {
+                Err(HttpError::Deadline { host: base.host.clone(), after: deadline_after })
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Reports whether the deadline has passed.
+    pub fn flag(&self) -> DeadlineFlag {
+        DeadlineFlag(self.expired.clone())
+    }
+
+    /// End the deadline: from now on reads and writes go straight to the socket, with whatever timeouts and
+    /// blocking mode its owner sets through [`DeadlineStream::tcp`].
+    pub fn end_deadline(&mut self) {
+        self.deadline = None;
+    }
+
+    pub fn tcp(&self) -> &TcpStream {
+        &self.tcp
     }
 
     fn passed(&self) -> io::Error {
@@ -326,8 +359,8 @@ impl DeadlineStream {
     }
 
     /// How long the next call may wait.
-    fn wait(&self) -> io::Result<Duration> {
-        let left = self.deadline.saturating_duration_since(Instant::now());
+    fn wait(&self, deadline: Instant) -> io::Result<Duration> {
+        let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
             return Err(self.passed());
         }
@@ -335,11 +368,11 @@ impl DeadlineStream {
     }
 
     /// A blocking socket reports its timeout as `WouldBlock` (Unix) or `TimedOut` (Windows).
-    fn timed_out(&self, e: io::Error, waited: Duration) -> io::Error {
+    fn timed_out(&self, e: io::Error, waited: Duration, deadline: Instant) -> io::Error {
         if !matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) {
             return e;
         }
-        if Instant::now() >= self.deadline {
+        if Instant::now() >= deadline {
             return self.passed();
         }
         io::Error::new(io::ErrorKind::TimedOut, format!("nothing sent or received for {} ms", waited.as_millis()))
@@ -348,37 +381,29 @@ impl DeadlineStream {
 
 impl Read for DeadlineStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let wait = self.wait()?;
-        if wait != self.read_armed && rearm(self.tcp.set_read_timeout(Some(wait)))? {
+        let Some(deadline) = self.deadline else { return self.tcp.read(buf) };
+        let wait = self.wait(deadline)?;
+        if !self.eof && wait != self.read_armed {
+            self.tcp.set_read_timeout(Some(wait))?;
             self.read_armed = wait;
         }
-        self.tcp.read(buf).map_err(|e| self.timed_out(e, wait))
-    }
-}
-
-/// Whether a changed socket timeout took effect. macOS refuses `setsockopt` with `EINVAL` once the connection is
-/// shut down in both directions (shown by the test
-/// `a_read_after_the_peer_closed_needs_its_timeout_changed_and_still_completes`): a read then returns at once
-/// (data still buffered, or end of stream) and a write fails at once, so the call goes ahead with the old
-/// timeout. Should `EINVAL` mean anything else, that one call still waits at most the old timeout, which is
-/// never more than `io_timeout`. Every other error, std's own `InvalidInput` for a zero timeout included, is
-/// returned.
-fn rearm(set: io::Result<()>) -> io::Result<bool> {
-    match set {
-        Ok(()) => Ok(true),
-        #[cfg(target_vendor = "apple")]
-        Err(e) if e.raw_os_error() == Some(22) => Ok(false),
-        Err(e) => Err(e),
+        let n = self.tcp.read(buf).map_err(|e| self.timed_out(e, wait, deadline))?;
+        if n == 0 && !buf.is_empty() {
+            self.eof = true;
+        }
+        Ok(n)
     }
 }
 
 impl Write for DeadlineStream {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let wait = self.wait()?;
-        if wait != self.write_armed && rearm(self.tcp.set_write_timeout(Some(wait)))? {
+        let Some(deadline) = self.deadline else { return self.tcp.write(buf) };
+        let wait = self.wait(deadline)?;
+        if wait != self.write_armed {
+            self.tcp.set_write_timeout(Some(wait))?;
             self.write_armed = wait;
         }
-        self.tcp.write(buf).map_err(|e| self.timed_out(e, wait))
+        self.tcp.write(buf).map_err(|e| self.timed_out(e, wait, deadline))
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -871,7 +896,8 @@ mod tests {
         let injected = BaseUrl { host: "localhost".into(), port: 443, prefix: "/api\r\nX-Injected: 1\r\nX-Tail:".into() };
         let e = HttpsClient::new(connector(), injected.clone(), test_limits(), "t/0").err().unwrap();
         assert!(matches!(&e, HttpError::Request { msg } if msg.starts_with("base URL: path prefix")), "{e}");
-        let e = connect_tcp(&injected, Duration::from_secs(1), Duration::from_secs(1)).unwrap_err();
+        let one = Duration::from_secs(1);
+        let e = DeadlineStream::connect(&injected, one, one, one).unwrap_err();
         assert!(matches!(&e, HttpError::Request { msg } if msg.starts_with("base URL: path prefix")), "{e}");
 
         let base = BaseUrl { host: "localhost".into(), port: 443, prefix: String::new() };
@@ -1042,33 +1068,89 @@ mod tests {
         server.join().unwrap();
     }
 
-    #[test]
-    fn a_read_after_the_peer_closed_needs_its_timeout_changed_and_still_completes() {
-        // The deadline is nearer than the I/O timeout, so the read must change the socket timeout after the
-        // connection is already shut down in both directions.
+    /// A connection shut down in both directions: the peer sent `x` and closed, and this side shut its writing
+    /// half. Both socket timeouts were set to `io_timeout` while it was still open, as `connect_until` does.
+    fn shut_both_ways(io_timeout: Duration) -> TcpStream {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = l.local_addr().unwrap();
         let server = std::thread::spawn(move || {
             let (mut s, _) = l.accept().unwrap();
             s.write_all(b"x").unwrap();
         });
-        let io_timeout = Duration::from_secs(5);
         let tcp = TcpStream::connect(addr).unwrap();
         tcp.set_read_timeout(Some(io_timeout)).unwrap();
+        tcp.set_write_timeout(Some(io_timeout)).unwrap();
         server.join().unwrap();
         tcp.shutdown(std::net::Shutdown::Write).unwrap();
         std::thread::sleep(Duration::from_millis(100));
-        let expired = Arc::new(AtomicBool::new(false));
-        let mut s = DeadlineStream::new(tcp, io_timeout, Instant::now() + Duration::from_secs(2), expired.clone());
+        tcp
+    }
+
+    fn stream_on(tcp: TcpStream, io_timeout: Duration, deadline: Instant) -> DeadlineStream {
+        DeadlineStream {
+            tcp,
+            io_timeout,
+            deadline: Some(deadline),
+            expired: Arc::new(AtomicBool::new(false)),
+            read_armed: io_timeout,
+            write_armed: io_timeout,
+            eof: false,
+        }
+    }
+
+    #[test]
+    fn a_read_after_the_peer_closed_needs_its_timeout_changed_and_still_completes() {
+        // The deadline starts 300 ms beyond the 1 s I/O timeout: the first reads keep the socket's timeout, and
+        // the second returns end of stream. After 500 ms the deadline is nearer than the I/O timeout, so a read
+        // would change the socket timeout — on a connection shut in both directions, which macOS refuses
+        // (EINVAL). End of stream was seen, so the read needs no timeout and is made without one.
+        let io_timeout = Duration::from_secs(1);
+        let mut s = stream_on(shut_both_ways(io_timeout), io_timeout, Instant::now() + Duration::from_millis(1300));
         let mut buf = [0u8; 8];
-        let start = Instant::now();
         assert_eq!(s.read(&mut buf).unwrap(), 1);
         assert_eq!(s.read(&mut buf).unwrap(), 0);
-        // A write on the shut connection fails at once, and not with the refused timeout change.
-        let e = s.write(b"y").unwrap_err();
-        assert_ne!(e.raw_os_error(), Some(22), "{e}");
-        assert!(start.elapsed() < Duration::from_millis(500), "{:?}", start.elapsed());
-        assert!(!expired.load(Ordering::Relaxed));
+        std::thread::sleep(Duration::from_millis(500));
+        let start = Instant::now();
+        assert_eq!(s.read(&mut buf).unwrap(), 0);
+        assert_eq!(s.read_armed, io_timeout, "the read timeout was left alone after end of stream");
+        // A write on the shut connection fails at once.
+        assert!(s.write(b"y").is_err());
+        assert!(start.elapsed() < Duration::from_millis(200), "{:?}", start.elapsed());
+        assert!(!s.flag().passed());
+    }
+
+    #[test]
+    fn an_error_changing_the_socket_timeout_is_returned() {
+        // The first read must change the socket timeout (deadline nearer than the I/O timeout) before any end of
+        // stream has been seen. On a connection shut in both directions macOS refuses that with EINVAL, and the
+        // read returns that error; other systems accept the change and the read returns the byte.
+        let io_timeout = Duration::from_secs(5);
+        let mut s = stream_on(shut_both_ways(io_timeout), io_timeout, Instant::now() + Duration::from_secs(2));
+        let mut buf = [0u8; 8];
+        let r = s.read(&mut buf);
+        if cfg!(target_vendor = "apple") {
+            let e = r.unwrap_err();
+            assert_eq!(e.raw_os_error(), Some(22), "{e}");
+            assert_eq!(s.read_armed, io_timeout);
+        } else {
+            assert_eq!(r.unwrap(), 1);
+        }
+    }
+
+    #[test]
+    fn an_ended_deadline_passes_calls_straight_to_the_socket() {
+        // A non-blocking socket's WouldBlock reaches the caller as WouldBlock, not as a timeout.
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let server = std::thread::spawn(move || l.accept().unwrap());
+        let tcp = TcpStream::connect(addr).unwrap();
+        let _peer = server.join().unwrap();
+        let mut s = stream_on(tcp, Duration::from_secs(1), Instant::now());
+        s.end_deadline();
+        s.tcp().set_nonblocking(true).unwrap();
+        let mut buf = [0u8; 8];
+        assert_eq!(s.read(&mut buf).unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        assert!(!s.flag().passed());
     }
 
     #[test]
