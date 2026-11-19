@@ -6,9 +6,11 @@
 //!    once in the main module's `.text` (SecuROM decrypts `.text` at run time, so early scans find
 //!    nothing); pages that are not committed+readable count as "not yet";
 //! 3. hash `.text` (the build identity, [`crate::build_id`]) before anything is patched;
-//! 4. add the `Mp` Lua namespace through m2-sdk.dll's Lua host at once ([`crate::lua::win::install`]): the
-//!    game creates its Lua state early in start-up, and `Mp` must be registered on it;
-//! 5. build the TLS connector, worker thread and runtime, then detour ProtoSSL (the game reaches
+//! 4. add the `Mp` Lua namespace and the leaderboard functions of `Net` and `Pg` through m2-sdk.dll's Lua host
+//!    at once ([`crate::lua::win::install`]): the game creates its Lua state early in start-up, and they must
+//!    be registered on it;
+//! 5. build the TLS connector, worker thread (which the leaderboards then send through) and runtime, then
+//!    detour ProtoSSL (the game reaches
 //!    ProtoSSLConnect only from the front end, long after start-up) and GameSpy Voice ([`crate::voice`]:
 //!    `GVInitialize` and `GVStartup` do nothing, so in-game voice never starts).
 //!
@@ -54,8 +56,9 @@ use mercs2_formats::mod_runtime as rt;
 use crate::worker::{RestApi, Worker};
 
 const TITLE: &str = "multiplayer_restored";
-/// The m2-sdk.dll release this ASI is built against (manifest.yaml requires `>=0.6.0`).
-const SDK_BUILT: &str = "0.6.0";
+/// The m2-sdk.dll release this ASI is built against (manifest.yaml requires `>=0.6.2`: the leaderboard callbacks'
+/// `m2_lua_ref`, `m2_lua_unref`, `m2_lua_push_ref` and `m2_lua_pcall`).
+const SDK_BUILT: &str = "0.6.2";
 /// How often the start-up thread re-scans `.text` while waiting for SecuROM to decrypt it.
 const SCAN_INTERVAL: Duration = Duration::from_millis(250);
 
@@ -356,7 +359,8 @@ fn init(hinst: usize) {
     for f in VoiceFn::ALL {
         log.info(format!("signature {} -> {:#x}", f.name(), voice.va(f)));
     }
-    crate::lua::win::install(&img.image, &log, fatal);
+    let session = crate::session::new_slot();
+    crate::lua::win::install(&img.image, session.clone(), &log, fatal);
 
     let connector = mercs2_https::tls::mozilla_connector().unwrap_or_else(|e| fatal(Some(&log), &format!("TLS setup: {e}")));
     log.info("TLS connector ready (CA bundle loaded)");
@@ -388,15 +392,19 @@ fn init(hinst: usize) {
         request_timeout: Duration::from_millis(cfg.request_timeout_ms.into()),
         max_body: crate::worker::MAX_RESPONSE_BODY,
     };
-    let http = HttpsClient::new(connector, cfg.server.clone(), limits, &crate::user_agent())
+    let http = HttpsClient::new(connector.clone(), cfg.server.clone(), limits, &crate::user_agent())
         .unwrap_or_else(|e| fatal(Some(&log), &format!("REST client: {e}")));
-    let api = RestApi::new(http);
+    // The leaderboards' requests end after PS3's 10 s, so a slow board holds the one worker no longer than that.
+    let board_limits = mercs2_https::Limits { request_timeout: crate::leaderboard::TIMEOUT, ..limits };
+    let boards = HttpsClient::new(connector, cfg.server.clone(), board_limits, &crate::user_agent())
+        .unwrap_or_else(|e| fatal(Some(&log), &format!("leaderboard REST client: {e}")));
+    let api = RestApi::new(http, boards);
     let worker = Worker::spawn(move |req| api.execute(req))
         .unwrap_or_else(|e| fatal(Some(&log), &format!("cannot start the worker thread: {e}")));
+    crate::lua::win::start_leaderboards(worker.handle(), &log, fatal);
     let account: Arc<dyn crate::account::StoredAccount> =
         Arc::new(crate::account::GameIni::of_main_module().unwrap_or_else(|e| fatal(Some(&log), &format!("stored account: {e}"))));
     log.info(format!("stored account: {}", account.describe()));
-    let session = crate::session::new_slot();
     let lobby: Arc<dyn LobbyProvider> = Arc::new(lobby);
     crate::account::install(crate::account::Logout::new(account.clone(), session.clone(), lobby.clone()))
         .unwrap_or_else(|e| fatal(Some(&log), &e));
@@ -424,17 +432,16 @@ fn init(hinst: usize) {
     log.info("GameSpy Voice disabled (GVInitialize, GVStartup detoured); use external voice chat");
 }
 
-/// `int __cdecl mr_session_v1(MrSessionV1 *out)` (`include/multiplayer_restored.h`): the logged-in session for
-/// other ASIs. 1 = signed in, 0 = not signed in (also before start-up has finished), -1 = error (logged when
-/// the log is open). The rules are [`crate::session_export::export`]'s.
+/// `int __cdecl mr_session_v1(MrSessionV1 *out)` (`include/multiplayer_restored.h`): who is signed in, for
+/// other ASIs (never the token). 1 = signed in, 0 = not signed in (also before start-up has finished), -1 =
+/// error (logged when the log is open). The rules are [`crate::session_export::export`]'s.
 ///
 /// # Safety
 /// `out` is NULL or points to a caller-owned `MrSessionV1` whose `struct_size` the caller has set.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mr_session_v1(out: *mut crate::session_export::MrSessionV1) -> i32 {
     let runtime = RUNTIME.get();
-    let source = runtime.map(|r| crate::session_export::Source { server: &r.cfg.server, session: &r.factory.session });
-    match unsafe { crate::session_export::export(out, source) } {
+    match unsafe { crate::session_export::export(out, runtime.map(|r| &r.factory.session)) } {
         Ok(true) => 1,
         Ok(false) => 0,
         Err(e) => {
