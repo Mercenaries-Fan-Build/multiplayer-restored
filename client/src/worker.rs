@@ -55,6 +55,18 @@ pub enum BackendReply {
     LeaderboardEntry(LeaderboardEntry),
 }
 
+impl BackendReply {
+    /// The variant's name, for log lines: a `SessionCreated` holds the session token, so a reply is never
+    /// formatted with `Debug` into a log.
+    pub fn name(&self) -> &'static str {
+        match self {
+            BackendReply::AccountCreated(_) => "AccountCreated",
+            BackendReply::SessionCreated(_) => "SessionCreated",
+            BackendReply::LeaderboardEntry(_) => "LeaderboardEntry",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BackendFailure {
     /// The server answered with an `ApiError` body.
@@ -110,7 +122,15 @@ impl RestApi {
         expect: u16,
     ) -> Result<T, BackendFailure> {
         let resp = client.request(method, route, headers, json).map_err(|e| BackendFailure::Transport(e.to_string()))?;
-        let snippet = || String::from_utf8_lossy(&resp.body[..resp.body.len().min(200)]).into_owned();
+        // The start of the body, for an error status only: a success body can hold the session token
+        // (`SessionCreated`), so of one that is not what was expected only its size is told.
+        let snippet = || {
+            if (200..300).contains(&resp.status) {
+                format!("<{} byte body>", resp.body.len())
+            } else {
+                String::from_utf8_lossy(&resp.body[..resp.body.len().min(200)]).into_owned()
+            }
+        };
         if resp.status == expect {
             return serde_json::from_slice(&resp.body).map_err(|e| {
                 BackendFailure::Transport(format!("{route}: HTTP {} body is not the expected JSON ({e}): {}", resp.status, snippet()))
@@ -351,6 +371,23 @@ mod tests {
             assert!(db.ban_from_leaderboards(user, "test", 1).await.unwrap());
         });
         assert_eq!(code(rest.execute(&push("DlcCon001", 600))), ErrorCode::Forbidden);
+    }
+
+    #[test]
+    fn a_success_body_that_is_not_the_expected_reply_is_told_by_size_only() {
+        // A session (token included) where an account was expected, and a session body that does not decode.
+        let session = r#"{"token":"s3cret-token","user_id":1,"display_name":"n","expires_at":1}"#;
+        let req = BackendRequest::CreateAccount(CreateAccount { username: "newbie".into(), password: "longenough".into() });
+        let (out, _) = run(&ok_json(session), req);
+        let Err(BackendFailure::Transport(m)) = out else { panic!("{out:?}") };
+        assert!(m.contains("unexpected HTTP 200 (expected 201)") && m.contains("byte body"), "{m}");
+        assert!(!m.contains("s3cret"), "{m}");
+        let (out, _) = run(&ok_json(r#"{"token":"s3cret-token"}"#), session_req());
+        let Err(BackendFailure::Transport(m)) = out else { panic!("{out:?}") };
+        assert!(m.contains("not the expected JSON") && !m.contains("s3cret"), "{m}");
+        // An error status still shows the start of its body.
+        let (out, _) = run(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 3\r\n\r\nbad", session_req());
+        assert!(matches!(out, Err(BackendFailure::Transport(m)) if m.ends_with("bad")));
     }
 
     #[test]
