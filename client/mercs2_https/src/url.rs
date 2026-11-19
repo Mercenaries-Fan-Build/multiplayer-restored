@@ -28,14 +28,51 @@ impl BaseUrl {
             Some((h, p)) => (h, p.parse::<u16>().map_err(|_| format!("port {p:?} is not a number 1-65535"))?),
             None => (authority, 443),
         };
-        if port == 0 {
+        let base = BaseUrl { host: host.to_ascii_lowercase(), port, prefix: path.trim_end_matches('/').to_owned() };
+        base.validate()?;
+        Ok(base)
+    }
+
+    /// The rules [`BaseUrl::parse`] applies, for a value built field by field: a non-zero port, a host of
+    /// ASCII letters, digits, `.` and `-`, and a prefix that is empty or an RFC 3986 `path-abempty` (`/`
+    /// segments of unreserved characters, `%XX` escapes, sub-delims, `:` and `@`) without a trailing slash.
+    /// The prefix goes into the request line as is, so nothing else — no space, control character, CR or LF
+    /// — may reach it.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.port == 0 {
             return Err("port 0 is invalid".into());
         }
+        let host = &self.host;
         if host.is_empty() || !host.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-') {
             return Err(format!("host {host:?} must be a DNS name or IPv4 address"));
         }
-        let prefix = path.trim_end_matches('/').to_owned();
-        Ok(BaseUrl { host: host.to_ascii_lowercase(), port, prefix })
+        let prefix = self.prefix.as_bytes();
+        if prefix.is_empty() {
+            return Ok(());
+        }
+        let bad = |what: &str| Err(format!("path prefix {:?} {what}", self.prefix));
+        if prefix[0] != b'/' {
+            return bad("must start with '/'");
+        }
+        if prefix.ends_with(b"/") {
+            return bad("must not end with '/'");
+        }
+        let mut i = 0;
+        while i < prefix.len() {
+            let b = prefix[i];
+            if b == b'%' {
+                if !prefix.get(i + 1..i + 3).is_some_and(|h| h.iter().all(u8::is_ascii_hexdigit)) {
+                    return bad("has a '%' not followed by two hex digits");
+                }
+                i += 3;
+                continue;
+            }
+            if !(b.is_ascii_alphanumeric() || b"/-._~!$&'()*+,;=:@".contains(&b)) {
+                return bad(&format!("contains byte {b:#04x}, which is not allowed in a URL path"));
+            }
+            i += 1;
+        }
+        Ok(())
     }
 
     /// The request target for an API route such as `/v1/sessions`.
@@ -78,9 +115,35 @@ mod tests {
             "https://user@mp.example.org",
             "https://",
             "https://mp_example.org",
+            // The prefix reaches the request line: CR/LF would inject headers.
+            "https://mp.example.org/api\r\nX-Injected: 1\r\nX-Tail:",
+            "https://mp.example.org/a\nb",
+            "https://mp.example.org/a b",
+            "https://mp.example.org/a\tb",
+            "https://mp.example.org/a\0b",
+            "https://mp.example.org/\u{7f}",
+            "https://mp.example.org/é",
+            "https://mp.example.org/a\\b",
+            "https://mp.example.org/a%2",
+            "https://mp.example.org/a%zz",
+            "https://mp.example.org/a\"b",
+            "https://mp.example.org/<a>",
         ] {
             assert!(BaseUrl::parse(bad).is_err(), "{bad:?} should be rejected");
         }
+    }
+
+    #[test]
+    fn validate_checks_values_built_field_by_field() {
+        let ok = |prefix: &str| BaseUrl { host: "h".into(), port: 443, prefix: prefix.into() }.validate();
+        for good in ["", "/api", "/a/b-c_d.e~f", "/%2F%0d%0a", "/!$&'()*+,;=:@"] {
+            assert_eq!(ok(good), Ok(()), "{good:?}");
+        }
+        for bad in ["api", "/api/", "/a\r\nb", "/a b", "/a\u{0}"] {
+            assert!(ok(bad).is_err(), "{bad:?}");
+        }
+        assert!(BaseUrl { host: "h\r\n".into(), port: 443, prefix: String::new() }.validate().is_err());
+        assert!(BaseUrl { host: "h".into(), port: 0, prefix: String::new() }.validate().is_err());
     }
 
     #[test]
