@@ -226,9 +226,7 @@ pub fn ws_url(base: &BaseUrl) -> String {
 fn connect(settings: &WsSettings, token: &str) -> Result<Ws, String> {
     let base = &settings.base;
     let tcp = mercs2_https::http::connect_tcp(base, settings.connect_timeout, settings.io_timeout).map_err(|e| e.to_string())?;
-    let tls = settings
-        .connector
-        .connect(&base.host, tcp)
+    let tls = mercs2_https::tls::connect(&settings.connector, &base.host, tcp)
         .map_err(|e| format!("TLS handshake with {} failed: {e}", base.host))?;
     let url = ws_url(base);
     let mut req = url.as_str().into_client_request().map_err(|e| format!("WebSocket request for {url}: {e}"))?;
