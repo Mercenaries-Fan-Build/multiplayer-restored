@@ -44,7 +44,9 @@ mod tests {
 
     #[test]
     fn embedded_bundle_is_the_recorded_one() {
-        assert_eq!(crate::build_id::sha256_hex(CA_BUNDLE), CA_BUNDLE_SHA256);
+        use sha2::{Digest, Sha256};
+        let hex: String = Sha256::digest(CA_BUNDLE).iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(hex, CA_BUNDLE_SHA256);
         let published = include_str!("../ca/cacert.pem.sha256");
         assert!(published.starts_with(CA_BUNDLE_SHA256), "{published}");
         let text = std::str::from_utf8(CA_BUNDLE).unwrap();
