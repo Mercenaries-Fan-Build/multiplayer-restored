@@ -366,6 +366,7 @@ fn init(hinst: usize) {
             connector: connector.clone(),
             connect_timeout: Duration::from_millis(cfg.connect_timeout_ms.into()),
             io_timeout: Duration::from_millis(cfg.io_timeout_ms.into()),
+            open_timeout: Duration::from_millis(cfg.request_timeout_ms.into()),
             poll_interval: Duration::from_millis(cfg.ws_poll_interval_ms.into()),
             idle_timeout: Duration::from_secs(cfg.ws_idle_timeout_secs.into()),
         },
@@ -388,7 +389,7 @@ fn init(hinst: usize) {
         max_body: crate::worker::MAX_RESPONSE_BODY,
     };
     let http = HttpsClient::new(connector, cfg.server.clone(), limits, &crate::user_agent())
-    .unwrap_or_else(|e| fatal(Some(&log), &format!("REST client: {e}")));
+        .unwrap_or_else(|e| fatal(Some(&log), &format!("REST client: {e}")));
     let api = RestApi::new(http);
     let worker = Worker::spawn(move |req| api.execute(req))
         .unwrap_or_else(|e| fatal(Some(&log), &format!("cannot start the worker thread: {e}")));
