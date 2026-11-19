@@ -55,6 +55,8 @@ codegen-units = 1
 
 [dev-dependencies]
 base64 = "0.22"
+# `mercs2_https::testing` (test CA, one-shot TLS server) for this crate's tests only.
+mercs2_https = { path = "mercs2_https", features = ["testing"] }
 # The real server, started in-process by the WebSocket / relay integration tests.
 mercs2_mp_server = "0.1.0"
 tokio = { version = "1", features = ["full"] }
