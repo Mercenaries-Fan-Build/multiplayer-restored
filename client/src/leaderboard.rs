@@ -66,6 +66,15 @@ pub trait LuaRefs: Lua {
     /// error (logged by m2-sdk.dll, the function and arguments popped), or [`PCALL_REFUSED`] when nothing was
     /// called and the stack is unchanged.
     fn pcall(&mut self, nargs: i32) -> i32;
+    /// Remove the top `n` values; false when m2-sdk.dll refused and removed nothing.
+    fn pop(&mut self, n: i32) -> bool;
+}
+
+/// Remove the `n` values this call pushed; a refusal means the stack is not what the call left on it.
+fn pop_pushed<L: LuaRefs>(s: &mut L, n: i32, what: &str, log: &mut dyn FnMut(String)) {
+    if !s.pop(n) {
+        log(format!("[!] {what}: m2_lua_pop refused to remove the {n} value(s) this call pushed (m2-sdk.log has why)"));
+    }
 }
 
 /// A callback held in the registry of global state `g`.
@@ -402,9 +411,8 @@ pub struct Delivery {
 }
 
 /// Call a taken callback on its state, then release its references. Nothing is called when m2-sdk.dll refuses
-/// to push the callback or its `self`. m2-sdk.dll has no export that pops a value, so a callback pushed before
-/// its `self` was refused stays on the Lua stack, as do the callback and its arguments when `m2_lua_pcall`
-/// refuses to call; both are logged as errors.
+/// to push the callback or its `self`, or refuses the call; whatever this call pushed by then is popped, so the
+/// stack is left as it was. Each refusal is logged as an error.
 pub fn call<L: LuaRefs>(s: &mut L, d: Delivery, log: &mut dyn FnMut(String)) {
     let Delivery { what, cb, board, outcome } = d;
     if !s.push_ref(cb.func) {
@@ -415,10 +423,8 @@ pub fn call<L: LuaRefs>(s: &mut L, d: Delivery, log: &mut dyn FnMut(String)) {
     let mut nargs = 0;
     if let Some(t) = cb.this {
         if !s.push_ref(t) {
-            log(format!(
-                "[!] {what}: m2_lua_push_ref refused the callback's self (m2-sdk.log has why); not called, and the \
-                 callback stays on the Lua stack (m2-sdk.dll has no export to pop it)"
-            ));
+            log(format!("[!] {what}: m2_lua_push_ref refused the callback's self (m2-sdk.log has why); not called"));
+            pop_pushed(s, 1, &what, log);
             release(s, Some(cb), log);
             return;
         }
@@ -443,10 +449,10 @@ pub fn call<L: LuaRefs>(s: &mut L, d: Delivery, log: &mut dyn FnMut(String)) {
     }
     match s.pcall(nargs) {
         0 => {}
-        PCALL_REFUSED => log(format!(
-            "[!] {what}: m2_lua_pcall refused to call (m2-sdk.log has why); the callback and its {nargs} argument(s) \
-             stay on the Lua stack (m2-sdk.dll has no export to pop them)"
-        )),
+        PCALL_REFUSED => {
+            log(format!("[!] {what}: m2_lua_pcall refused to call (m2-sdk.log has why); not called"));
+            pop_pushed(s, nargs + 1, &what, log);
+        }
         status => log(format!("[!] {what}: the callback failed with Lua status {status} (the error is in m2-sdk.log)")),
     }
     release(s, Some(cb), log);
@@ -518,6 +524,10 @@ mod tests {
         refuse_push: Vec<i32>,
         /// What `pcall` returns; anything but 0 calls nothing.
         pcall_status: i32,
+        /// `pop` refuses (removes nothing).
+        refuse_pop: bool,
+        /// Each `pop`'s count.
+        pops: Vec<i32>,
     }
 
     impl TestLua {
@@ -535,6 +545,8 @@ mod tests {
                 fail_ref: false,
                 refuse_push: vec![],
                 pcall_status: 0,
+                refuse_pop: false,
+                pops: vec![],
             }
         }
         fn with_args(mut self, args: Vec<Arg>) -> Self {
@@ -622,6 +634,15 @@ mod tests {
                 self.calls.push(called);
             }
             self.pcall_status
+        }
+        fn pop(&mut self, n: i32) -> bool {
+            self.pops.push(n);
+            let n = n as usize;
+            if self.refuse_pop || n > self.stack.len() {
+                return false;
+            }
+            self.stack.truncate(self.stack.len() - n);
+            true
         }
     }
 
@@ -879,7 +900,9 @@ mod tests {
         assert!(l.calls.is_empty() && l.stack.is_empty() && l.live_refs() == 0, "{logs:?}");
         assert!(logs.iter().any(|x| x.contains("refused the callback (m2-sdk.log has why); not called")), "{logs:?}");
 
-        // Its self refused after the callback was pushed: not called; the callback stays on the stack.
+        assert!(l.pops.is_empty(), "nothing was pushed, so nothing is popped");
+
+        // Its self refused after the callback was pushed: not called; the callback is popped.
         let mut l = TestLua::new(7, vec![st("DlcCon001"), Arg::Func(10), v(Val::Table)]);
         let mut lb = Leaderboards::default();
         lb.get_score(&mut l, &mut e);
@@ -888,8 +911,8 @@ mod tests {
         let mut logs = vec![];
         deliver(&mut lb, &mut l, finish(&job, standing(1, 1)), e.now, &mut |x| logs.push(x));
         assert!(l.calls.is_empty() && l.live_refs() == 0, "{logs:?}");
-        assert_eq!(l.stack, [Arg::Func(10)]);
-        assert!(logs.iter().any(|x| x.contains("refused the callback's self") && x.contains("stays on the Lua stack")), "{logs:?}");
+        assert_eq!((l.stack.clone(), l.pops.clone()), (vec![], vec![1]), "the pushed callback is popped");
+        assert!(logs.iter().any(|x| x.contains("refused the callback's self")), "{logs:?}");
     }
 
     #[test]
@@ -905,12 +928,25 @@ mod tests {
             deliver(&mut lb, &mut l, finish(&job, standing(1, 1)), e.now, &mut |x| logs.push(x));
             assert!(l.calls.is_empty() && l.live_refs() == 0, "{want}");
             assert!(logs.iter().any(|x| x.contains(want)), "{want}: {logs:?}");
-            if status == PCALL_REFUSED {
-                assert_eq!(l.stack.len(), 4, "the callback and its three arguments stay: {:?}", l.stack);
-            } else {
-                assert!(l.stack.is_empty());
-            }
+            assert!(l.stack.is_empty(), "{want}: the stack is left as it was: {:?}", l.stack);
+            let want_pops: Vec<i32> = if status == PCALL_REFUSED { vec![4] } else { vec![] };
+            assert_eq!(l.pops, want_pops, "a refused call pops the callback and its three arguments; a failed one was popped by Lua");
         }
+    }
+
+    #[test]
+    fn a_refused_pop_is_logged() {
+        let mut l = TestLua::new(7, vec![st("DlcCon001"), Arg::Func(10), v(Val::Table)]);
+        let mut e = env();
+        let mut lb = Leaderboards::default();
+        lb.get_score(&mut l, &mut e);
+        let job = e.sent.pop().unwrap();
+        l.refuse_push = vec![2];
+        l.refuse_pop = true;
+        let mut logs = vec![];
+        deliver(&mut lb, &mut l, finish(&job, standing(1, 1)), e.now, &mut |x| logs.push(x));
+        assert!(l.calls.is_empty() && l.live_refs() == 0, "{logs:?}");
+        assert!(logs.iter().any(|x| x.starts_with("[!]") && x.contains("m2_lua_pop refused to remove the 1 value(s)")), "{logs:?}");
     }
 
     #[test]
