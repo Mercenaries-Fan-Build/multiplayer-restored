@@ -384,7 +384,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "117725a109d387c937a1533ce01b450cbde6b88abceea8473c4d7a85853cda3c"
 dependencies = [
  "lazy_static",
- "windows-sys 0.59.0",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
@@ -574,7 +574,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e35d6e78f4cebb90e51d543db8fe41528851d6deeef6ef21ebd4bfdc1e784776"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1301,7 +1301,7 @@ checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
 [[package]]
 name = "loadprobe"
 version = "2.4.1"
-source = "git+https://github.com/Mercenaries-Fan-Build/mercs2-wad-simulator?rev=8124bd42a9500bf97a611cdd0004b9f360b4c882#8124bd42a9500bf97a611cdd0004b9f360b4c882"
+source = "git+https://github.com/Mercenaries-Fan-Build/mercs2-wad-simulator?rev=c105d629c9d77f8c587df8eaa66a52c1eecbcd74#c105d629c9d77f8c587df8eaa66a52c1eecbcd74"
 dependencies = [
  "clap",
  "colored",
@@ -1358,7 +1358,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 [[package]]
 name = "mercs2_formats"
 version = "6.0.3"
-source = "git+https://github.com/Mercenaries-Fan-Build/mercs2-wad-simulator?rev=8124bd42a9500bf97a611cdd0004b9f360b4c882#8124bd42a9500bf97a611cdd0004b9f360b4c882"
+source = "git+https://github.com/Mercenaries-Fan-Build/mercs2-wad-simulator?rev=c105d629c9d77f8c587df8eaa66a52c1eecbcd74#c105d629c9d77f8c587df8eaa66a52c1eecbcd74"
 dependencies = [
  "aes",
  "cmac",
@@ -1989,7 +1989,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2045,7 +2045,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2605,7 +2605,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3098,7 +3098,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
@@ -3121,15 +3121,6 @@ name = "windows-sys"
 version = "0.52.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "282be5f36a8ce781fad8c8ae18fa3f9beff57ec1b52cb3de0789201425d9a33d"
-dependencies = [
- "windows-targets 0.52.6",
-]
-
-[[package]]
-name = "windows-sys"
-version = "0.59.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e38bc4d79ed67fd075bcc251a1c39b32a1776bbe92e5bef1f0bf1f8c531853b"
 dependencies = [
  "windows-targets 0.52.6",
 ]
