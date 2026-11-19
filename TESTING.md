@@ -31,14 +31,14 @@ Start the game and stay on the main menu.
 - The m2-sdk Shipment is installed: `m2-sdk.dll` is in the game root. Without it the ASI is not loaded at all
   and `pmc_blackbox.log` shows `[FAILED] multiplayer_restored.asi`.
 - Log shows, in this order (each line's timestamp shows how long the step before it took):
-  1. `m2-sdk.dll 0.6.x (built against 0.6.0)` (`win/mod.rs:346`);
-  2. `signature <Fn> -> 0x…` for all eight ProtoSSL functions (`:351`), then `build .text sha256 …` (`:353`),
-     then `signature GVInitialize -> 0x…` and `signature GVStartup -> 0x…` (`:356`);
+  1. `m2-sdk.dll 0.6.x (built against 0.6.0)` (`win/mod.rs:347`);
+  2. `signature <Fn> -> 0x…` for all eight ProtoSSL functions (`:352`), then `build .text sha256 …` (`:354`),
+     then `signature GVInitialize -> 0x…` and `signature GVStartup -> 0x…` (`:357`);
   3. `signature OnlineAccountClear -> 0x… (account name 0x…, password 0x…)` (`lua/win.rs:106`), then `Lua
      namespace Mp (GetRoomKey, SetRoomKey, Logout) added through m2-sdk.dll` (`lua/win.rs:118`);
-  4. `TLS connector ready (CA bundle loaded)` (`win/mod.rs:361`), `runtime ready (worker thread, connection
-     table)` (`:417`), then `ProtoSSL detours installed: Connect Disconnect Destroy Update Send Recv Stat` (`:419`)
-     and `GameSpy Voice disabled (GVInitialize, GVStartup detoured); use external voice chat` (`:420`).
+  4. `TLS connector ready (CA bundle loaded)` (`win/mod.rs:362`), `runtime ready (worker thread, connection
+     table)` (`:420`), then `ProtoSSL detours installed: Connect Disconnect Destroy Update Send Recv Stat` (`:422`)
+     and `GameSpy Voice disabled (GVInitialize, GVStartup detoured); use external voice chat` (`:423`).
 - **Failure looks like:** a message box naming the problem, then the game exits. Send the box text + log.
 - Send back: the `build .text sha256` value and which exe you ran (retail / bypass / nodrm). That value pins
   the build in the ASI's table.
