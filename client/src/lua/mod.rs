@@ -9,7 +9,8 @@
 //!
 //! Module map: [`signature`] (the account buffers `Mp.Logout` empties), [`bindings`] (what each `Mp`
 //! function does, over [`mercs2_formats::mod_runtime::lua::Lua`]), and the Windows-only entry points and
-//! registration in `win`.
+//! registration in `win`, which also adds the leaderboard functions to the engine's `Net` and `Pg` tables
+//! ([`crate::leaderboard`], [`crate::net`], [`crate::cheats`]).
 
 pub mod bindings;
 pub mod signature;
