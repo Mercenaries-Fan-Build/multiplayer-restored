@@ -31,7 +31,8 @@
 //! [http]
 //! connect_timeout_ms = 10000              ; also used for the lobby WebSocket's TCP connect
 //! io_timeout_ms = 15000                   ; also bounds the WebSocket's TLS + upgrade handshake
-//! request_timeout_ms = 30000              ; a whole REST request: connect, TLS handshake, send, full response
+//! request_timeout_ms = 30000              ; a whole REST request: connect, TLS handshake, send, full response;
+//!                                         ; also bounds opening the lobby WebSocket (connect, TLS, upgrade)
 //!
 //! [websocket]
 //! poll_interval_ms = 10                   ; lobby WebSocket thread: how often it services its socket
