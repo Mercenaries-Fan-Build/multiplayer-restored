@@ -277,6 +277,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "bytemuck"
+version = "1.25.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "95832e849adfb21180ccb6826a99da14e5d266ae5c2e668e1602cf234f153797"
+
+[[package]]
 name = "byteorder"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1295,8 +1301,7 @@ checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
 [[package]]
 name = "loadprobe"
 version = "2.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ec4e3300243105d56ac4764ab065a91d0bb2d3ce268a8de345fd8713f255ba0"
+source = "git+https://github.com/Mercenaries-Fan-Build/mercs2-wad-simulator?rev=8124bd42a9500bf97a611cdd0004b9f360b4c882#8124bd42a9500bf97a611cdd0004b9f360b4c882"
 dependencies = [
  "clap",
  "colored",
@@ -1352,15 +1357,15 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "mercs2_formats"
-version = "6.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eebc96f9e66c92e6e950792bf03ae5cb270b7a06ade4e0bb3d2f06ae38850979"
+version = "6.0.3"
+source = "git+https://github.com/Mercenaries-Fan-Build/mercs2-wad-simulator?rev=8124bd42a9500bf97a611cdd0004b9f360b4c882#8124bd42a9500bf97a611cdd0004b9f360b4c882"
 dependencies = [
  "aes",
  "cmac",
  "flate2",
  "gltf",
  "loadprobe",
+ "nanomp3",
  "serde",
  "serde_json",
  "sha2",
@@ -1380,9 +1385,8 @@ dependencies = [
 
 [[package]]
 name = "mercs2_mp_api"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba1b7dcff09bff7b1e0c17ebe650c2af9356d2428e83fb38dc432fbbd4b12d7c"
+version = "0.1.1"
+source = "git+https://github.com/Mercenaries-Fan-Build/multiplayer-server?rev=51c89e4de1f4ae9c753c9dba4299a6dd4abd5de0#51c89e4de1f4ae9c753c9dba4299a6dd4abd5de0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1391,9 +1395,8 @@ dependencies = [
 
 [[package]]
 name = "mercs2_mp_server"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d5bdc1ed42e5a4baf2ab2d4a1bbbd1bdf291ec98d9954b86804f1ebfc2e92b6d"
+version = "0.1.1"
+source = "git+https://github.com/Mercenaries-Fan-Build/multiplayer-server?rev=51c89e4de1f4ae9c753c9dba4299a6dd4abd5de0#51c89e4de1f4ae9c753c9dba4299a6dd4abd5de0"
 dependencies = [
  "argon2",
  "axum",
@@ -1484,6 +1487,24 @@ dependencies = [
  "tokio",
  "tungstenite",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "nanomp3"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "acd9a8d0592a17ee5211aae2f976e6dc2f6846135d1f49665b3f19a7afd23435"
+dependencies = [
+ "nanomp3-core",
+]
+
+[[package]]
+name = "nanomp3-core"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "63fa2238e662d3d3c1a71168b3278f23422cf9bf76f6943ee6b1c2581d74eb5c"
+dependencies = [
+ "wide",
 ]
 
 [[package]]
@@ -2049,6 +2070,15 @@ name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
+
+[[package]]
+name = "safe_arch"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "42c6efa15875e6ecb39ca61fb0b0c1a40b84fac5a5ffe71eef7d1000c8eb3f5f"
+dependencies = [
+ "bytemuck",
+]
 
 [[package]]
 name = "same-file"
@@ -3050,6 +3080,16 @@ checksum = "5d4a4db5077702ca3015d3d02d74974948aba2ad9e12ab7df718ee64ccd7e97d"
 dependencies = [
  "libredox",
  "wasite",
+]
+
+[[package]]
+name = "wide"
+version = "1.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d920ac99c3c8edce110cb8d07dbb324d6d026011dce85b1e9355b70f0adacc4f"
+dependencies = [
+ "bytemuck",
+ "safe_arch",
 ]
 
 [[package]]
