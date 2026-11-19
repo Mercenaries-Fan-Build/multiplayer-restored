@@ -1,6 +1,6 @@
 //! The lobby WebSocket (`GET <base>/v1/ws`, `mercs2_mp_api::ws`) on its own thread.
 //!
-//! Transport: the same TLS policy as the REST client ([`crate::tls`]: TLS ≥ 1.2, SNI, chain verification
+//! Transport: the same TLS policy as the REST client (`mercs2_https::tls`: TLS ≥ 1.2, SNI, chain verification
 //! against the embedded Mozilla bundle, hostname verification), `Authorization: Bearer <session token>` on
 //! the upgrade request, RFC 6455 framing by `tungstenite`. The TCP connect, TLS handshake and upgrade run
 //! blocking with the `[http]` timeouts; after that the socket is switched to non-blocking and the thread
@@ -30,7 +30,8 @@ use openssl::ssl::{SslConnector, SslStream};
 use tungstenite::client::IntoClientRequest;
 use tungstenite::{HandshakeError, Message, WebSocket};
 
-use crate::config::BaseUrl;
+use mercs2_https::BaseUrl;
+
 use crate::lobby::{Lobby, LobbyEvent, LobbyProvider};
 use crate::log::Logger;
 use crate::session::LoggedIn;
@@ -224,7 +225,7 @@ pub fn ws_url(base: &BaseUrl) -> String {
 
 fn connect(settings: &WsSettings, token: &str) -> Result<Ws, String> {
     let base = &settings.base;
-    let tcp = crate::http::connect_tcp(base, settings.connect_timeout, settings.io_timeout).map_err(|e| e.to_string())?;
+    let tcp = mercs2_https::http::connect_tcp(base, settings.connect_timeout, settings.io_timeout).map_err(|e| e.to_string())?;
     let tls = settings
         .connector
         .connect(&base.host, tcp)
