@@ -1,12 +1,14 @@
 [package]
 name = "multiplayer_restored"
-version = "0.5.0"
+version = "0.6.0"
 description = "Mercenaries 2 multiplayer client ASI: terminates FESL/Theater locally and talks to the multiplayer server over HTTPS"
 edition = "2024"
 publish = false
 
-# Standalone package: its own workspace root.
+# Standalone package: its own workspace root. `mercs2_https` is the HTTPS client and trust policy shared with
+# other ASIs, which depend on it from this repository by tag.
 [workspace]
+members = ["mercs2_https"]
 
 [lib]
 crate-type = ["cdylib"]
@@ -20,10 +22,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 sha2 = "0.10"
-httparse = "1"
-openssl = { version = "0.10", features = ["vendored"] }
-# Pins the vendored OpenSSL to the 3.x series (openssl-src 300.x builds OpenSSL 3.x).
-openssl-src = "300"
+# REST client, TLS policy and the embedded CA bundle; it also vendors and pins OpenSSL 3, which the `openssl`
+# dependency below shares.
+mercs2_https = { path = "mercs2_https" }
+openssl = "0.10"
 # `SSL_ctrl(DTLS_CTRL_HANDLE_TIMEOUT)`: DTLS handshake retransmission over the relay shim's memory BIO
 # (the `openssl` crate has no wrapper for `DTLSv1_handle_timeout`).
 openssl-sys = "0.9"
