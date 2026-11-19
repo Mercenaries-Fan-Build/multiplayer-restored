@@ -381,13 +381,13 @@ fn init(hinst: usize) {
         },
         log: log.clone(),
     };
-    let http = HttpsClient::new(
-        connector,
-        cfg.server.clone(),
-        Duration::from_millis(cfg.connect_timeout_ms.into()),
-        Duration::from_millis(cfg.io_timeout_ms.into()),
-        &crate::user_agent(),
-    )
+    let limits = mercs2_https::Limits {
+        connect_timeout: Duration::from_millis(cfg.connect_timeout_ms.into()),
+        io_timeout: Duration::from_millis(cfg.io_timeout_ms.into()),
+        request_timeout: Duration::from_millis(cfg.request_timeout_ms.into()),
+        max_body: crate::worker::MAX_RESPONSE_BODY,
+    };
+    let http = HttpsClient::new(connector, cfg.server.clone(), limits, &crate::user_agent())
     .unwrap_or_else(|e| fatal(Some(&log), &format!("REST client: {e}")));
     let api = RestApi::new(http);
     let worker = Worker::spawn(move |req| api.execute(req))
