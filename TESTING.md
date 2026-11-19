@@ -34,12 +34,12 @@ Start the game and stay on the main menu.
   1. `m2-sdk.dll 0.6.x (built against 0.6.2)` (`win/mod.rs:350`);
   2. `signature <Fn> -> 0x…` for all eight ProtoSSL functions (`:355`), then `build .text sha256 …` (`:357`),
      then `signature GVInitialize -> 0x…` and `signature GVStartup -> 0x…` (`:360`);
-  3. `signature OnlineAccountClear -> 0x… (account name 0x…, password 0x…)` (`lua/win.rs:391`), then
-     `save-record singleton pointer 0x… (cheats flag at +0x66)` (`lua/win.rs:400`), then `Lua namespace Mp
+  3. `signature OnlineAccountClear -> 0x… (account name 0x…, password 0x…)` (`lua/win.rs:394`), then
+     `save-record singleton pointer 0x… (cheats flag at +0x66)` (`lua/win.rs:403`), then `Lua namespace Mp
      (GetRoomKey, SetRoomKey, Logout) and Net.GetUserName, Net.LeaderboardGetScore, Net.LeaderboardPushScore,
-     Pg.SetCheatsUsed, Pg.WereCheatsUsed added through m2-sdk.dll` (`lua/win.rs:416`);
+     Pg.SetCheatsUsed, Pg.WereCheatsUsed added through m2-sdk.dll` (`lua/win.rs:419`);
   4. `TLS connector ready (CA bundle loaded)` (`win/mod.rs:366`), `leaderboards ready (worker thread)`
-     (`lua/win.rs:427`), `runtime ready (worker thread, connection table)` (`win/mod.rs:429`), then `ProtoSSL
+     (`lua/win.rs:430`), `runtime ready (worker thread, connection table)` (`win/mod.rs:429`), then `ProtoSSL
      detours installed: Connect Disconnect Destroy Update Send Recv Stat` (`:431`) and `GameSpy Voice disabled
      (GVInitialize, GVStartup detoured); use external voice chat` (`:432`).
 - Once the front end runs Lua: `state 0x… (new cycle …): [ok] "function" "function" …` (seven of them), from the
@@ -126,8 +126,8 @@ Needs the Blow It Up Again Shipment, in a version that no longer registers the l
 2. Log out (or play without logging in) and finish a contract: log `Net.LeaderboardPushScore: not signed in
    online; nothing sent, no callback`; no request on the server.
 3. A save in which cheats were used: log `cheats were used in this save; no score is pushed (as PS3)`.
-- Any `[!]`-level `Net.Leaderboard…` line, `m2_lua_push_ref refused` or `m2_lua_pcall refused` → send the
-  log and `m2-sdk.log`.
+- Any `[!]`-level `Net.Leaderboard…` line, `m2_lua_push_ref refused`, `m2_lua_pcall refused` or
+  `m2_lua_pop refused` → send the log and `m2-sdk.log`.
 
 ## Send back after the run
 
