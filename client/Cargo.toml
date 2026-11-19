@@ -61,14 +61,3 @@ mercs2_https = { path = "mercs2_https", features = ["testing"] }
 mercs2_mp_server = "0.1.1"
 tokio = { version = "1", features = ["full"] }
 tempfile = "3"
-
-# TEMPORARY: replaced by the crates.io releases mercs2_formats 6.0.3, mercs2_mp_api 0.1.1 and mercs2_mp_server 0.1.1;
-# delete this table then.
-# mercs2_formats 6.0.3: m2-sdk 0.6.2's ref exports (m2_lua_ref handles; m2_lua_unref / m2_lua_push_ref return a status)
-# and m2_lua_pop.
-# mercs2_mp_api 0.1.1: the leaderboard types (rest::PushScore, rest::LeaderboardEntry, rules::LEADERBOARD_SCORE_MAX).
-# mercs2_mp_server 0.1.1 (tests only): the leaderboard routes. Both from the same commit, so there is one mercs2_mp_api.
-[patch.crates-io]
-mercs2_formats = { git = "https://github.com/Mercenaries-Fan-Build/mercs2-wad-simulator", rev = "c105d629c9d77f8c587df8eaa66a52c1eecbcd74" }
-mercs2_mp_api = { git = "https://github.com/Mercenaries-Fan-Build/multiplayer-server", rev = "51c89e4de1f4ae9c753c9dba4299a6dd4abd5de0" }
-mercs2_mp_server = { git = "https://github.com/Mercenaries-Fan-Build/multiplayer-server", rev = "51c89e4de1f4ae9c753c9dba4299a6dd4abd5de0" }
