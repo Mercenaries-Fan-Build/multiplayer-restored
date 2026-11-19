@@ -1,7 +1,14 @@
-//! Blocking HTTPS/1.1 JSON client for the server's REST endpoints. Runs only on the worker thread.
+//! Blocking HTTPS/1.1 JSON client for a server's REST endpoints. It blocks for up to the connect timeout plus
+//! the I/O timeout per read or write, so run it on a worker thread, never on the game thread.
 //!
 //! One request per connection (`Connection: close`). Response framing: `Content-Length`, or
 //! `Transfer-Encoding: chunked`, or (neither) read to a clean TLS close. Anything else is an error.
+//!
+//! The client writes `Host`, `User-Agent`, `Accept: application/json`, `Connection: close` and, with a
+//! body, `Content-Type: application/json` and `Content-Length` itself. A caller header with one of those
+//! names, a header name that is not an RFC 9110 token, or a value with a control character is refused
+//! before anything is sent. Error messages name a refused header but never print its value, so an
+//! `Authorization` token never reaches a log.
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
@@ -10,7 +17,7 @@ use std::time::Duration;
 use openssl::ssl::SslConnector;
 use thiserror::Error;
 
-use crate::config::BaseUrl;
+use crate::url::BaseUrl;
 
 /// Upper bound on a response (headers + body). The API's bodies are a few hundred bytes.
 const MAX_RESPONSE: usize = 1 << 20;
@@ -28,12 +35,75 @@ pub enum HttpError {
     Io { host: String, msg: String },
     #[error("malformed HTTP response from {host}: {msg}")]
     Malformed { host: String, msg: String },
+    /// The request was refused before anything was sent.
+    #[error("invalid request: {msg}")]
+    Request { msg: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Response {
     pub status: u16,
     pub body: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Method {
+    Get,
+    Post,
+    Put,
+    Patch,
+    Delete,
+}
+
+impl Method {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Method::Get => "GET",
+            Method::Post => "POST",
+            Method::Put => "PUT",
+            Method::Patch => "PATCH",
+            Method::Delete => "DELETE",
+        }
+    }
+}
+
+/// Headers the client writes itself (compared case-insensitively).
+const OWN_HEADERS: [&str; 7] =
+    ["host", "user-agent", "accept", "content-type", "content-length", "connection", "transfer-encoding"];
+
+/// RFC 9110 `tchar`.
+fn is_tchar(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)
+}
+
+/// Visible ASCII, space and tab; no CR, LF, NUL or other control character.
+fn is_field_value(v: &str) -> bool {
+    v.bytes().all(|b| b == b'\t' || (0x20..0x7f).contains(&b))
+}
+
+fn check_header(name: &str, value: &str) -> Result<(), HttpError> {
+    if name.is_empty() || !name.bytes().all(is_tchar) {
+        return Err(HttpError::Request { msg: format!("header name {name:?} is not an HTTP token") });
+    }
+    if OWN_HEADERS.iter().any(|h| h.eq_ignore_ascii_case(name)) {
+        return Err(HttpError::Request { msg: format!("header {name} is written by the client itself") });
+    }
+    if !is_field_value(value) {
+        return Err(HttpError::Request {
+            msg: format!("the value of header {name} contains a control or non-ASCII character"),
+        });
+    }
+    Ok(())
+}
+
+/// A route is `/` followed by visible ASCII other than `#`.
+fn check_route(route: &str) -> Result<(), HttpError> {
+    if !route.starts_with('/') || !route.bytes().all(|b| (0x21..0x7f).contains(&b) && b != b'#') {
+        return Err(HttpError::Request {
+            msg: format!("route {route:?} must start with '/' and hold only visible ASCII other than '#'"),
+        });
+    }
+    Ok(())
 }
 
 pub struct HttpsClient {
@@ -45,42 +115,73 @@ pub struct HttpsClient {
 }
 
 impl HttpsClient {
-    pub fn new(connector: SslConnector, base: BaseUrl, connect_timeout: Duration, io_timeout: Duration) -> Self {
-        HttpsClient {
-            connector,
-            base,
-            connect_timeout,
-            io_timeout,
-            user_agent: format!("multiplayer_restored/{}", crate::ASI_VERSION),
+    /// A client for `base`. `user_agent` (e.g. `"my_mod/1.2.0"`) is sent as `User-Agent` on every request;
+    /// it must be a valid header value.
+    pub fn new(
+        connector: SslConnector,
+        base: BaseUrl,
+        connect_timeout: Duration,
+        io_timeout: Duration,
+        user_agent: &str,
+    ) -> Result<Self, HttpError> {
+        if user_agent.is_empty() || !is_field_value(user_agent) {
+            return Err(HttpError::Request { msg: format!("User-Agent {user_agent:?} is not a valid header value") });
         }
+        Ok(HttpsClient { connector, base, connect_timeout, io_timeout, user_agent: user_agent.to_owned() })
     }
 
     pub fn base(&self) -> &BaseUrl {
         &self.base
     }
 
-    /// `POST <base prefix><route>` with a JSON body.
-    pub fn post_json(&self, route: &str, json: &[u8]) -> Result<Response, HttpError> {
+    /// `<method> <base prefix><route>` with the caller's `headers` (e.g. `("Authorization", "Bearer …")`)
+    /// and, when `json` is given, that JSON body. Returns the status and the decoded body whatever the
+    /// status is; deciding which statuses are success is the caller's.
+    pub fn request(
+        &self,
+        method: Method,
+        route: &str,
+        headers: &[(&str, &str)],
+        json: Option<&[u8]>,
+    ) -> Result<Response, HttpError> {
+        check_route(route)?;
+        for (name, value) in headers {
+            check_header(name, value)?;
+        }
         let host = &self.base.host;
+        let host_header =
+            if self.base.port == 443 { host.clone() } else { format!("{host}:{}", self.base.port) };
+        let mut head = format!(
+            "{} {} HTTP/1.1\r\nHost: {host_header}\r\nUser-Agent: {}\r\nAccept: application/json\r\n",
+            method.as_str(),
+            self.base.path(route),
+            self.user_agent,
+        );
+        for (name, value) in headers {
+            head.push_str(&format!("{name}: {value}\r\n"));
+        }
+        if let Some(body) = json {
+            head.push_str(&format!("Content-Type: application/json\r\nContent-Length: {}\r\n", body.len()));
+        }
+        head.push_str("Connection: close\r\n\r\n");
+
         let tcp = connect_tcp(&self.base, self.connect_timeout, self.io_timeout)?;
         let mut tls = self
             .connector
             .connect(host, tcp)
             .map_err(|e| HttpError::Tls { host: host.clone(), msg: e.to_string() })?;
-        let host_header =
-            if self.base.port == 443 { host.clone() } else { format!("{host}:{}", self.base.port) };
-        let head = format!(
-            "POST {} HTTP/1.1\r\nHost: {host_header}\r\nUser-Agent: {}\r\nAccept: application/json\r\n\
-             Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            self.base.path(route),
-            self.user_agent,
-            json.len()
-        );
         let io = |e: std::io::Error| HttpError::Io { host: host.clone(), msg: e.to_string() };
         tls.write_all(head.as_bytes()).map_err(io)?;
-        tls.write_all(json).map_err(io)?;
+        if let Some(body) = json {
+            tls.write_all(body).map_err(io)?;
+        }
         tls.flush().map_err(io)?;
         read_response(&mut tls, host)
+    }
+
+    /// `POST <base prefix><route>` with a JSON body and no extra headers.
+    pub fn post_json(&self, route: &str, json: &[u8]) -> Result<Response, HttpError> {
+        self.request(Method::Post, route, &[], Some(json))
     }
 }
 
@@ -237,16 +338,9 @@ fn decode_chunked(b: &[u8]) -> Result<Option<Vec<u8>>, String> {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use super::*;
-    use openssl::asn1::Asn1Time;
-    use openssl::bn::BigNum;
-    use openssl::hash::MessageDigest;
-    use openssl::pkey::{PKey, Private};
-    use openssl::rsa::Rsa;
-    use openssl::ssl::{SslAcceptor, SslMethod};
-    use openssl::x509::extension::{BasicConstraints, SubjectAlternativeName};
-    use openssl::x509::{X509, X509NameBuilder};
+    use crate::testing::{client_for, serve_once, test_pki};
     use std::net::TcpListener;
 
     #[test]
@@ -289,102 +383,86 @@ pub(crate) mod tests {
 
     // ---- live TLS tests against a local OpenSSL server with a throwaway CA ----
 
-    pub struct TestPki {
-        pub ca_pem: Vec<u8>,
-        pub leaf_cert: X509,
-        pub leaf_key: PKey<Private>,
+    #[test]
+    fn get_with_authorization_sends_no_body_headers() {
+        let pki = test_pki();
+        let body = br#"{"rows":[]}"#;
+        let resp = [format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len()).as_bytes(), body].concat();
+        let (port, server) = serve_once(&pki, resp);
+        let c = client_for(&pki.ca_pem, "localhost", port);
+        let r = c.request(Method::Get, "/v1/board?x=1", &[("Authorization", "Bearer t0k")], None).unwrap();
+        assert_eq!(r, Response { status: 200, body: body.to_vec() });
+        let (req, _) = server.join().unwrap().unwrap();
+        let req = String::from_utf8(req).unwrap();
+        assert_eq!(
+            req,
+            format!(
+                "GET /api/v1/board?x=1 HTTP/1.1\r\nHost: localhost:{port}\r\nUser-Agent: mercs2_https-test/0\r\n\
+                 Accept: application/json\r\nAuthorization: Bearer t0k\r\nConnection: close\r\n\r\n"
+            )
+        );
     }
 
-    fn name(cn: &str) -> openssl::x509::X509Name {
-        let mut n = X509NameBuilder::new().unwrap();
-        n.append_entry_by_text("CN", cn).unwrap();
-        n.build()
+    #[test]
+    fn put_with_headers_and_json_body() {
+        let pki = test_pki();
+        let (port, server) = serve_once(&pki, b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n".to_vec());
+        let c = client_for(&pki.ca_pem, "localhost", port);
+        let r = c
+            .request(Method::Put, "/v1/x", &[("Authorization", "Bearer a"), ("X-Run", "7")], Some(b"{\"s\":1}"))
+            .unwrap();
+        assert_eq!(r, Response { status: 204, body: Vec::new() });
+        let req = String::from_utf8(server.join().unwrap().unwrap().0).unwrap();
+        assert!(req.starts_with("PUT /api/v1/x HTTP/1.1\r\n"), "{req}");
+        assert!(
+            req.ends_with(
+                "Authorization: Bearer a\r\nX-Run: 7\r\nContent-Type: application/json\r\nContent-Length: 7\r\n\
+                 Connection: close\r\n\r\n{\"s\":1}"
+            ),
+            "{req}"
+        );
     }
 
-    /// A CA and a leaf for `localhost` (DNS SAN), signed by that CA.
-    pub fn test_pki() -> TestPki {
-        let ca_key = PKey::from_rsa(Rsa::generate(2048).unwrap()).unwrap();
-        let mut ca = X509::builder().unwrap();
-        ca.set_version(2).unwrap();
-        ca.set_serial_number(&BigNum::from_u32(1).unwrap().to_asn1_integer().unwrap()).unwrap();
-        ca.set_subject_name(&name("mr-test-ca")).unwrap();
-        ca.set_issuer_name(&name("mr-test-ca")).unwrap();
-        ca.set_pubkey(&ca_key).unwrap();
-        ca.set_not_before(&Asn1Time::days_from_now(0).unwrap()).unwrap();
-        ca.set_not_after(&Asn1Time::days_from_now(2).unwrap()).unwrap();
-        ca.append_extension(BasicConstraints::new().critical().ca().build().unwrap()).unwrap();
-        ca.sign(&ca_key, MessageDigest::sha256()).unwrap();
-        let ca = ca.build();
-
-        let leaf_key = PKey::from_rsa(Rsa::generate(2048).unwrap()).unwrap();
-        let mut leaf = X509::builder().unwrap();
-        leaf.set_version(2).unwrap();
-        leaf.set_serial_number(&BigNum::from_u32(2).unwrap().to_asn1_integer().unwrap()).unwrap();
-        leaf.set_subject_name(&name("localhost")).unwrap();
-        leaf.set_issuer_name(ca.subject_name()).unwrap();
-        leaf.set_pubkey(&leaf_key).unwrap();
-        leaf.set_not_before(&Asn1Time::days_from_now(0).unwrap()).unwrap();
-        leaf.set_not_after(&Asn1Time::days_from_now(2).unwrap()).unwrap();
-        let san = SubjectAlternativeName::new().dns("localhost").build(&leaf.x509v3_context(Some(&ca), None)).unwrap();
-        leaf.append_extension(san).unwrap();
-        leaf.sign(&ca_key, MessageDigest::sha256()).unwrap();
-        TestPki { ca_pem: ca.to_pem().unwrap(), leaf_cert: leaf.build(), leaf_key }
+    #[test]
+    fn bad_requests_are_refused_before_connecting_and_never_echo_values() {
+        // Nothing listens on this port: a refusal that tried to connect would be a Connect error instead.
+        let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let c = client_for(&test_pki().ca_pem, "127.0.0.1", port);
+        let secret = "Bearer s3cret";
+        for (route, headers) in [
+            ("/x", vec![("Authorization", "Bearer a\r\nX-Evil: 1")]),
+            ("/x", vec![("Authorization", "Bearer s3cret\0")]),
+            ("/x", vec![("Bad Name", secret)]),
+            ("/x", vec![("", secret)]),
+            ("/x", vec![("Host", secret)]),
+            ("/x", vec![("content-length", secret)]),
+            ("/x", vec![("Transfer-Encoding", secret)]),
+            ("/x", vec![("Connection", secret)]),
+            ("/x", vec![("User-Agent", secret)]),
+            ("/x", vec![("Content-Type", secret)]),
+            ("/x", vec![("Accept", secret)]),
+            ("x", vec![]),
+            ("/a b", vec![]),
+            ("/a\r\nb", vec![]),
+            ("/a#f", vec![]),
+        ] {
+            let e = c.request(Method::Post, route, &headers, Some(b"{}")).unwrap_err();
+            assert!(matches!(e, HttpError::Request { .. }), "{route:?} {headers:?}: {e}");
+            assert!(!e.to_string().contains("s3cret"), "{e}");
+        }
     }
 
-    /// What the test server saw: the raw request and the negotiated TLS version.
-    pub type Served = std::thread::JoinHandle<Result<(Vec<u8>, String), String>>;
-
-    /// Serve one connection: read the request head + body, check it, answer with `response`.
-    /// Returns the port and a handle yielding (request bytes, negotiated TLS version).
-    pub fn serve_once(
-        pki: &TestPki,
-        response: Vec<u8>,
-    ) -> (u16, Served) {
-        let mut acc = SslAcceptor::mozilla_intermediate_v5(SslMethod::tls_server()).unwrap();
-        acc.set_certificate(&pki.leaf_cert).unwrap();
-        acc.set_private_key(&pki.leaf_key).unwrap();
-        let acc = acc.build();
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let h = std::thread::spawn(move || {
-            let (tcp, _) = listener.accept().map_err(|e| e.to_string())?;
-            let mut s = acc.accept(tcp).map_err(|e| e.to_string())?;
-            let version = s.ssl().version_str().to_owned();
-            let mut req = Vec::new();
-            let mut b = [0u8; 4096];
-            loop {
-                let n = s.read(&mut b).map_err(|e| e.to_string())?;
-                req.extend_from_slice(&b[..n]);
-                if let Some(end) = req.windows(4).position(|w| w == b"\r\n\r\n") {
-                    let head = String::from_utf8_lossy(&req[..end]).to_ascii_lowercase();
-                    let len: usize = head
-                        .lines()
-                        .find_map(|l| l.strip_prefix("content-length:"))
-                        .map(|v| v.trim().parse().unwrap())
-                        .unwrap_or(0);
-                    if req.len() >= end + 4 + len {
-                        break;
-                    }
-                }
-                if n == 0 {
-                    return Err("client closed early".into());
-                }
-            }
-            s.write_all(&response).map_err(|e| e.to_string())?;
-            s.shutdown().map_err(|e| e.to_string())?;
-            Ok((req, version))
-        });
-        (port, h)
-    }
-
-    pub fn client_for(pki_pem: &[u8], host: &str, port: u16) -> HttpsClient {
-        let base = BaseUrl { host: host.into(), port, prefix: "/api".into() };
-        HttpsClient::new(
-            crate::tls::connector(pki_pem).unwrap(),
-            base,
-            Duration::from_secs(5),
-            Duration::from_secs(5),
-        )
+    #[test]
+    fn user_agent_must_be_a_header_value() {
+        let connector = || crate::tls::connector(&test_pki().ca_pem).unwrap();
+        let base = BaseUrl { host: "localhost".into(), port: 443, prefix: String::new() };
+        let t = Duration::from_secs(1);
+        for bad in ["", "a\r\nb", "x\0"] {
+            assert!(matches!(
+                HttpsClient::new(connector(), base.clone(), t, t, bad),
+                Err(HttpError::Request { .. })
+            ));
+        }
     }
 
     #[test]
@@ -422,7 +500,9 @@ pub(crate) mod tests {
             BaseUrl { host: "localhost".into(), port, prefix: String::new() },
             Duration::from_secs(5),
             Duration::from_secs(5),
-        );
+            "mercs2_https-test/0",
+        )
+        .unwrap();
         let e = c.post_json("/v1/sessions", b"{}").unwrap_err();
         assert!(matches!(&e, HttpError::Tls { msg, .. } if msg.contains("certificate verify failed")), "{e}");
         assert!(server.join().unwrap().is_err());
