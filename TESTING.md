@@ -49,7 +49,7 @@ Online → **Create Account** with a new username (3–31 letters/digits/`_-.`) 
 
 - Log: `AddAccount: account "<name>" created (user N)` (`fesl.rs:501`). Server log: one `POST /v1/accounts` 201.
 - Then **Login** with it. Log: `Login: "<name>" logged in as "<name>" (user N)` (`fesl.rs:485`), then
-  `lobby WebSocket connected to <domain>` (`ws.rs:245`).
+  `lobby WebSocket connected to <domain>` (`ws.rs:253`).
 - Negative: log in with a wrong password → the game shows its "account not found" message (code 101); log
   `Login: server refused: …` (`fesl.rs:507`).
 - Negative: create the same username again → the game shows an error; log `server refused: … name_taken`.
