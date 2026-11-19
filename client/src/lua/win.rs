@@ -224,9 +224,12 @@ impl LuaRefs for Refs<'_> {
     fn push_ref(&mut self, r: i32) -> bool {
         unsafe { ffi::m2_lua_push_ref(self.0.0, r) == 1 }
     }
-    /// No results: m2-sdk.dll has no export to read or pop them.
+    /// No results: m2-sdk.dll has no export to read them.
     fn pcall(&mut self, nargs: i32) -> i32 {
         unsafe { ffi::m2_lua_pcall(self.0.0, nargs, 0) }
+    }
+    fn pop(&mut self, n: i32) -> bool {
+        unsafe { ffi::m2_lua_pop(self.0.0, n) == 1 }
     }
 }
 
